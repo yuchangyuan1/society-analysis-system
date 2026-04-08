@@ -1,10 +1,10 @@
-# OpenClaw Society Project Plan
+# Society Project Plan
 
 ## 1. Project Positioning
 
 ### Proposed Title
 
-**OpenClaw Multimodal Social Media Propagation Analysis and Counter-Messaging System**
+**Multimodal Social Media Propagation Analysis and Counter-Messaging System**
 
 ### One-Sentence Goal
 
@@ -20,7 +20,7 @@ This project aligns with the course's Society direction because it focuses on:
 - social and community-level propagation analysis
 - counter-messaging and intervention support
 
-This is closer to the lecture definition of Society than a financial research workflow.
+This is a strong fit for the course's Society direction.
 
 ### Platform and Language Scope
 
@@ -40,12 +40,26 @@ The system should answer questions such as:
 
 ## 3. Design Principles
 
+### Framework: OpenClaw
+
+This project is built on **OpenClaw** (v2026.4.x, MIT license, GitHub: openclaw/openclaw).
+
+OpenClaw is chosen for three specific capabilities that directly match this project's needs:
+
+| OpenClaw Capability | How It Is Used Here |
+|---|---|
+| **Workspace isolation** | Each subagent (ingestion, analysis, risk, critic, visual) runs in its own workspace; file system state and auth credentials are fully isolated |
+| **Skills system** | Each reusable tool-calling rule (`claim-retrieve`, `image-post-ingest`, etc.) is implemented as an OpenClaw skill (`SKILL.md` + service call) |
+| **Multi-agent routing** | The planner agent routes user intent to the appropriate subagent workspace via OpenClaw's built-in routing |
+
+OpenClaw's daemon model is used in trigger mode for this analytical pipeline — agents are invoked on demand rather than running as persistent messaging bots.
+
 ### Architecture Principles
 
-- Reuse the current OpenClaw multi-agent architecture instead of rebuilding from scratch.
-- Keep deterministic execution in services.
-- Use skills as the standard tool-calling contract.
-- Use planner as the orchestration and routing layer.
+- Build as a greenfield project using OpenClaw as the agent runtime framework.
+- Keep deterministic execution in services; agentic reasoning stays inside bounded stages.
+- Use OpenClaw skills as the standard tool-calling contract.
+- Use the planner agent as the orchestration and routing layer.
 - Use hard orchestration for the main workflow and soft agentic reasoning inside bounded steps.
 
 ### Safety Principles
@@ -59,54 +73,65 @@ The system should answer questions such as:
 
 ```mermaid
 flowchart LR
-    U["User / Feishu / Analyst"] --> P["Planner Agent"]
-    P --> S["OpenClaw Skills Layer"]
-    S --> I["Ingestion Service"]
-    S --> K["Knowledge / RAG Service"]
-    S --> A["Propagation Analysis Service"]
-    S --> R["Misinformation Risk Service"]
-    S --> G["Counter-Message Generation Service"]
-    S --> C["Critic Service"]
-    S --> RP["Report Service"]
-    S --> V["Image / Diffusion Service"]
+    U["User / Analyst"] --> P["Planner Agent\n(OpenClaw main workspace)"]
 
-    I --> PG["Postgres"]
-    I --> FS["Raw Media Store"]
-    I --> KG["Knowledge Graph"]
-    I --> CH["Chroma"]
+    subgraph OC["OpenClaw Runtime"]
+        P -->|multi-agent routing| WI["Ingestion Workspace"]
+        P -->|multi-agent routing| WK["Knowledge Workspace"]
+        P -->|multi-agent routing| WA["Analysis Workspace"]
+        P -->|multi-agent routing| WR["Risk Workspace"]
+        P -->|multi-agent routing| WG["Counter-Message Workspace"]
+        P -->|multi-agent routing| WC["Critic Workspace"]
+        P -->|multi-agent routing| WRP["Report Workspace"]
+        P -->|multi-agent routing| WV["Visual Workspace"]
+    end
 
-    K --> PG
-    K --> CH
-    K --> KG
+    WI -->|skills| SK["OpenClaw Skills\n(x-post-ingest, image-post-ingest, ...)"]
+    WK -->|skills| SK
+    WA -->|skills| SK
+    WR -->|skills| SK
+    WG -->|skills| SK
+    WC -->|skills| SK
+    WRP -->|skills| SK
+    WV -->|skills| SK
 
-    A --> PG
-    A --> KG
+    WI --> PG["Postgres"]
+    WI --> FS["Raw Media Store"]
+    WI --> KG["Kuzu Knowledge Graph"]
+    WI --> CH["Chroma"]
 
-    R --> PG
-    R --> KG
+    WK --> PG
+    WK --> CH
+    WK --> KG
 
-    RP --> PG
-    C --> PG
-    V --> FS
+    WA --> PG
+    WA --> KG
 
-    RP --> OUT["Incident Report / Counter-Message / Visual Card"]
-    C --> OUT
+    WR --> PG
+    WR --> KG
+
+    WRP --> PG
+    WC --> PG
+    WV --> FS
+
+    WRP --> OUT["Incident Report / Counter-Message / Visual Card"]
+    WC --> OUT
 ```
 
-## 5. Component Mapping
+## 5. System Components
 
-The current project can be reused, but several modules must change their business meaning.
+This is a greenfield project built on OpenClaw. Each component maps to an **OpenClaw workspace** with its own isolated file system, memory, and skill set.
 
-| Current Module | New Role in Society Project | Change Level |
+| OpenClaw Workspace | Role | Key Skills |
 |---|---|---|
-| `planner` | orchestration, intent routing, workflow control | low |
-| `rag` / `knowledge` | retrieval of posts, claims, articles, fact-check evidence | low |
-| `report` | incident brief, propagation report, response summary | low |
-| `critic` | evidence sufficiency, overclaim detection, output review | low |
-| `ingestion` | social posts, images, articles, fact-check data ingestion | high |
-| `quant` | replaced by propagation analysis | high |
-| `risk` | replaced by misinformation / influence risk review | medium |
-| graph layer | from stock/filing graph to claim/post/account/topic graph | medium |
+| `planner` (main) | orchestration, intent classification, multi-agent routing | — |
+| `ingestion` | fetch posts from X API v2, ingest images and articles | `x-post-ingest`, `image-post-ingest` |
+| `knowledge` | evidence retrieval, claim deduplication, evidence pack assembly | `claim-retrieve` |
+| `analysis` | propagation trend computation, anomaly detection | `propagation-analyze` |
+| `risk` | misinformation risk scoring, human review routing | `misinfo-risk-review` |
+| `report` | incident report and propagation summary generation | `campaign-report-build` |
+| `critic` | evidence sufficiency check, overclaim detection, output gating | `critic-review` |
+| `visual` | visual clarification card generation via Stable Diffusion | `counter-visual-generate` |
 
 ## 6. Core Agents and Responsibilities
 
@@ -310,12 +335,29 @@ flowchart TD
 
 Tool calling should be implemented through **skills**, not ad hoc prompt instructions.
 
+### OpenClaw Skill Format
+
+Each skill is implemented as a directory containing a `SKILL.md` file. The `SKILL.md` defines the skill's purpose, input/output contract, and tool-calling instructions. Services execute the deterministic logic behind each skill.
+
+```
+skills/
+  claim-retrieve/
+    SKILL.md          # input/output contract, retrieval instructions
+  image-post-ingest/
+    SKILL.md
+  propagation-analyze/
+    SKILL.md
+  ...
+```
+
+Workspace-level skills take precedence over global skills, allowing per-workspace overrides when needed.
+
 ### Why Skills
 
-- stable input/output contract
-- reusable across workspaces
-- easier error handling
-- better fit with OpenClaw-native architecture
+- stable input/output contract enforced via `SKILL.md`
+- reusable across workspaces without duplication
+- consistent with OpenClaw's native tool-calling model
+- easier error handling and skill-level logging
 
 ### Proposed Skills
 
@@ -419,30 +461,35 @@ Do **not** start with:
 
 ## 14. Proposed Roadmap
 
-### Phase 1: Domain Shift
+### Phase 1: Foundation
 
-- replace finance-specific semantics with social-media semantics
-- rename `quant` to `analysis`
-- redefine `risk` as misinformation risk
-- update docs, schemas, and tests
+- set up project repository and development environment
+- install and configure OpenClaw runtime; initialize workspace directories for all agents
+- define Postgres schema for posts, images, claims, articles, reports, run logs
+- implement X API v2 ingestion pipeline (`x-post-ingest` skill + `SKILL.md`)
+- implement Chroma vector store and Kuzu knowledge graph initialization
+- implement planner workspace with intent classification and multi-agent routing
 
 ### Phase 2: Multimodal Evidence
 
-- add OCR
-- add image summary and embeddings
-- support image posts in retrieval and graph indexing
+- implement `image-post-ingest` skill (Claude Vision OCR + captioning + embedding)
+- implement claim extraction and two-stage deduplication
+- index posts and images into Chroma and Kuzu
+- implement `claim-retrieve` skill
 
-### Phase 3: Propagation Analysis
+### Phase 3: Propagation Analysis and Risk
 
-- add trend metrics
-- add stance and anomaly summaries
-- add graph-backed claim/topic views
+- implement `propagation-analyze` skill (trend metrics, stance distribution, anomaly signals)
+- implement `misinfo-risk-review` skill with human review routing
+- define graph-backed claim/topic views in Kuzu
 
-### Phase 4: Counter-Messaging
+### Phase 4: Counter-Messaging and Output
 
-- generate rebuttal text
-- add visual card generation
-- critic gate all final outputs
+- implement `counter-message-build` skill
+- implement `critic-review` skill with retry and blocking logic
+- implement `counter-visual-generate` skill (Stable Diffusion + Pillow)
+- implement `campaign-report-build` skill
+- end-to-end integration test across all intents
 
 ## 15. Evaluation
 
@@ -461,12 +508,13 @@ Recommended evaluation dimensions:
 
 ## 16. Final Recommendation
 
-If the project must align with the course's **Society** direction, this is the most defensible path:
+This project is built as a standalone greenfield system aligned with the course's **Society** direction:
 
-- keep the current OpenClaw multi-agent architecture
-- replace the financial application layer with a social-media propagation layer
-- strengthen the system with multimodal understanding
-- use a knowledge graph as the core relational memory
-- use diffusion or image generation only for counter-messaging, not as the primary analysis engine
+- clean multi-agent architecture designed specifically for social media propagation analysis
+- X (Twitter/X) as the primary data source via X API v2
+- multimodal evidence handling (text + image) as a first-class capability
+- Kuzu knowledge graph as the core relational memory for claims, accounts, and topics
+- Stable Diffusion for counter-messaging visual output only, not as the primary analysis engine
+- all components purpose-built for English-language, US-context social media
 
-This keeps the project technically coherent and much closer to the lecture definition of Society.
+This architecture is technically coherent, domain-appropriate, and fully aligned with the Society direction.

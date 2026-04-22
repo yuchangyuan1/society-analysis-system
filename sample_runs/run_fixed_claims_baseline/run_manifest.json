@@ -1,0 +1,23 @@
+{
+  "run_id": "20260420-025230-9805cf",
+  "started_at": "2026-04-20T02:52:30.616951",
+  "finished_at": "2026-04-20T02:53:30.958706",
+  "git_sha": null,
+  "openai_model": "gpt-4o",
+  "query_text": "Fixture-driven misinformation analysis on claim set: fixture-conspiracy-2026-04-19",
+  "subreddits": [],
+  "reddit_query": null,
+  "reddit_sort": "hot",
+  "channel": null,
+  "jsonl_path": null,
+  "image_url": null,
+  "image_path": null,
+  "days_back": 7,
+  "thresholds": {
+    "claim_embed_sim_high": 0.92,
+    "claim_embed_sim_low": 0.85
+  },
+  "posts_snapshot_sha256": "38bdf313dcfd7b4cf2e9f9b86caef9808e2710b2f6916d8fcf3a56a7dc2df90f",
+  "post_count": 10,
+  "report_id": "a1378aa7-1bcd-4c7f-9bb3-87b23124bac0"
+}

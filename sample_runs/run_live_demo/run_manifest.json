@@ -1,0 +1,25 @@
+{
+  "run_id": "20260420-041059-6afd7c",
+  "started_at": "2026-04-20T04:10:59.895424",
+  "finished_at": "2026-04-20T04:27:33.397120",
+  "git_sha": null,
+  "openai_model": "gpt-4o",
+  "query_text": "Discover trending topics and identify misinformation in r/conspiracy posts",
+  "subreddits": [
+    "conspiracy"
+  ],
+  "reddit_query": null,
+  "reddit_sort": "hot",
+  "channel": null,
+  "jsonl_path": null,
+  "image_url": null,
+  "image_path": null,
+  "days_back": 3,
+  "thresholds": {
+    "claim_embed_sim_high": 0.92,
+    "claim_embed_sim_low": 0.85
+  },
+  "posts_snapshot_sha256": "c026619042c699feaf5cf8cf9248cf9f7f2e330de9d70aadbe5ef27bdd8e4c92",
+  "post_count": 532,
+  "report_id": "1e7e7b6c-ab0f-46b0-8729-fb771e61bdde"
+}

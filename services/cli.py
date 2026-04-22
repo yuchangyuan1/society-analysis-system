@@ -117,8 +117,7 @@ def cmd_ingest_jsonl(args) -> None:
 
     vision = ClaudeVisionService()
     x_api = XApiService()
-    agent = IngestionAgent(pg=pg, chroma=chroma, kuzu=kuzu,
-                           embedder=embedder, vision=vision, x_api=x_api)
+    agent = IngestionAgent(pg=pg, kuzu=kuzu, vision=vision, x_api=x_api)
     posts = agent.ingest_posts_from_jsonl(args.path)
     print(json.dumps({"count": len(posts), "source": "jsonl"}))
 

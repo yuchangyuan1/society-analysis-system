@@ -4,7 +4,7 @@ Ingestion Workspace — post-ingest + image-post-ingest skills.
 Responsibilities:
   - Fetch posts from Telegram (primary) or X API (fallback) or JSONL file
   - For each image post: OCR + caption via Claude Vision
-  - Generate embeddings and store in Chroma + Kuzu + Postgres
+  - Persist posts to Kuzu + Postgres
 """
 from __future__ import annotations
 
@@ -14,11 +14,8 @@ from typing import Optional, Union
 
 import structlog
 
-from config import CLAIM_EMBED_SIM_HIGH
 from models.post import Post, ImageAsset
-from services.chroma_service import ChromaService
 from services.claude_vision_service import ClaudeVisionService
-from services.embeddings_service import EmbeddingsService
 from services.kuzu_service import KuzuService
 from services.postgres_service import PostgresService
 from services.telegram_service import TelegramService
@@ -32,18 +29,14 @@ class IngestionAgent:
     def __init__(
         self,
         pg: PostgresService,
-        chroma: ChromaService,
         kuzu: KuzuService,
-        embedder: EmbeddingsService,
         vision: ClaudeVisionService,
         telegram: Optional[TelegramService] = None,
         x_api: Optional[XApiService] = None,
         reddit: Optional[RedditService] = None,
     ) -> None:
         self._pg = pg
-        self._chroma = chroma
         self._kuzu = kuzu
-        self._embedder = embedder
         self._vision = vision
         # Prefer Telegram; fall back to X API if Telegram not configured
         self._telegram = telegram
@@ -257,16 +250,6 @@ class IngestionAgent:
                     image_id=img.id,
                     reason=vision_result.get("error", ""),
                 )
-            # Embed merged text
-            merged = (img.ocr_text or "") + " " + (img.image_caption or "")
-            if merged.strip():
-                embed = self._embedder.embed(merged)
-                embed_id = f"img-{img.id}"
-                self._chroma.upsert_post(
-                    embed_id, embed, merged,
-                    metadata={"post_id": post.id, "image_id": img.id, "type": "image"},
-                )
-                img.embedding_id = embed_id
             # Persist
             self._pg.upsert_image(
                 image_id=img.id,
@@ -280,13 +263,6 @@ class IngestionAgent:
             )
             updated_images.append(img)
         post.images = updated_images
-        # Re-embed the merged full post text (post + OCR + captions)
-        merged_full = post.merged_text()
-        embed_full = self._embedder.embed(merged_full)
-        self._chroma.upsert_post(
-            post.id, embed_full, merged_full,
-            metadata={"account_id": post.account_id, "has_image": True},
-        )
         return post
 
     # ── Internal ───────────────────────────────────────────────────────────────
@@ -340,9 +316,3 @@ class IngestionAgent:
         self._kuzu.upsert_account(post.account_id, post.account_id)
         self._kuzu.upsert_post(post.id, post.text)
         self._kuzu.add_posted(post.account_id, post.id)
-        # Chroma (text embedding)
-        embed = self._embedder.embed(post.text)
-        self._chroma.upsert_post(
-            post.id, embed, post.text,
-            metadata={"account_id": post.account_id, "has_image": post.has_image},
-        )

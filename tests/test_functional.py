@@ -820,8 +820,7 @@ class T09_PlannerEndToEnd(unittest.TestCase):
         news     = MagicMock()
         news.search.return_value = []
 
-        ingestion   = IngestionAgent(pg=pg, chroma=chroma, kuzu=kuzu,
-                                     embedder=embedder, vision=MagicMock(),
+        ingestion   = IngestionAgent(pg=pg, kuzu=kuzu, vision=MagicMock(),
                                      telegram=telegram, x_api=x_api, reddit=reddit)
         knowledge   = KnowledgeAgent(pg=pg, chroma=chroma, kuzu=kuzu, embedder=embedder)
         analysis    = AnalysisAgent(pg=pg, kuzu=kuzu)

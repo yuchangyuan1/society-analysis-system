@@ -154,7 +154,7 @@
 | 存储 | 用途 | 路径 / 连接 |
 |---|---|---|
 | **Filesystem** | run artefact、session、运行时日志 | `data/runs/` · `data/sessions/` · `sample_runs/` |
-| **Chroma** | evidence RAG（post 嵌入 + 官方源嵌入） | `data/chroma/`（本地持久化）|
+| **Chroma** | 2 个 collection：`articles`（官方新闻 / Wikipedia / NewsSearch 的 chunks — evidence RAG 查的就是它）、`claims`（归一化 claim 文本，用于 claim 去重） | `data/chroma/`（本地持久化）|
 | **Kuzu** | 图数据（社区结构快照，可选） | `data/kuzu_graph/` |
 | **PostgreSQL** | 原始 post 落盘（可选；不可用时降级 SQLite） | `.env::POSTGRES_*` |
 | **SQLite** | Postgres 不可用时的 fallback；counter_effect 历史 | `data/app.sqlite` |

@@ -1,5 +1,5 @@
 """
-Chroma vector store — semantic retrieval for posts, claims, articles.
+Chroma vector store — claim dedup + official-source evidence retrieval.
 """
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from chromadb.config import Settings
 
 from config import (
     CHROMA_PERSIST_DIR,
-    CHROMA_POSTS_COLLECTION,
     CHROMA_CLAIMS_COLLECTION,
     CHROMA_ARTICLES_COLLECTION,
 )
@@ -24,9 +23,6 @@ class ChromaService:
             path=persist_dir,
             settings=Settings(anonymized_telemetry=False),
         )
-        self._posts = self._client.get_or_create_collection(
-            CHROMA_POSTS_COLLECTION, metadata={"hnsw:space": "cosine"}
-        )
         self._claims = self._client.get_or_create_collection(
             CHROMA_CLAIMS_COLLECTION, metadata={"hnsw:space": "cosine"}
         )
@@ -34,25 +30,6 @@ class ChromaService:
             CHROMA_ARTICLES_COLLECTION, metadata={"hnsw:space": "cosine"}
         )
         log.info("chroma.initialized", persist_dir=persist_dir)
-
-    # ── Posts ──────────────────────────────────────────────────────────────────
-
-    def upsert_post(self, post_id: str, embedding: list[float],
-                    text: str, metadata: Optional[dict] = None) -> None:
-        self._posts.upsert(
-            ids=[post_id],
-            embeddings=[embedding],
-            documents=[text],
-            metadatas=[metadata or {"source": "post"}],
-        )
-
-    def query_posts(self, embedding: list[float], n_results: int = 10) -> list[dict]:
-        results = self._posts.query(
-            query_embeddings=[embedding],
-            n_results=n_results,
-            include=["documents", "metadatas", "distances"],
-        )
-        return self._flatten(results)
 
     # ── Claims ─────────────────────────────────────────────────────────────────
 

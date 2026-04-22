@@ -143,8 +143,7 @@ def build_planner() -> PlannerAgent:
 
     # Agents (each is an isolated workspace)
     ingestion = IngestionAgent(
-        pg=pg, chroma=chroma, kuzu=kuzu,
-        embedder=embedder, vision=vision,
+        pg=pg, kuzu=kuzu, vision=vision,
         telegram=telegram, x_api=x_api,
         reddit=reddit,
     )

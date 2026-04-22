@@ -66,7 +66,6 @@ EMBEDDING_MODEL: str = "text-embedding-3-small"
 EMBEDDING_DIM: int = 1536
 
 # ── Chroma collection names ────────────────────────────────────────────────────
-CHROMA_POSTS_COLLECTION: str = "posts"
 CHROMA_CLAIMS_COLLECTION: str = "claims"
 CHROMA_ARTICLES_COLLECTION: str = "articles"
 

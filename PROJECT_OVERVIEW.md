@@ -1,479 +1,416 @@
-# 社交媒体虚假信息分析系统 — 项目总览
+# Society Analysis — Project Overview
 
-> 文件路径：`society-analysis-project-update/`
-> 最后更新：2026-04-19（P0 全部完成 + 研究型 UI 上线）
+> 社交媒体虚假信息分析 + 交互式问答系统。离线批处理管道（Precompute Pipeline）持续产出可复现的 run artefact；上层会话式 AI Agent 通过 **Agent → Capability → Tool → Service** 四层架构把 run 数据转化为自然语言问答、事实核查、证据检索、传播解释、对比与出图。
 
----
-
-## 一、项目目标
-
-从社交媒体（Reddit / Telegram / X）采集帖子，自动完成：
-
-1. **识别虚假信息声明** — 提取、去重、聚类
-2. **评估传播风险** — 速度、异常检测、账号角色
-3. **检索权威证据** — 三级证据召回（内部 Chroma → Wikipedia → News）
-4. **生成反制内容** — 反驳文字 + 可视化图片卡片（有证据门控）
-5. **追踪反制效果** — 跨次运行的闭环对比（部署前后传播速度）
-
-**每次 run 产出可复现、可审计的 artifact 目录** `data/runs/{run_id}/`：
-- `run_manifest.json` — 输入参数、模型版本、阈值、git sha、posts 快照哈希
-- `report.md` — 模板渲染的 Markdown 报告（LLM 仅包装摘要段落）
-- `report_raw.json` — 完整 IncidentReport 结构化对象
-- `metrics.json` — 量化指标（evidence_coverage、modularity、closed_loop_rate 等）
-- `counter_visuals/` — 本次 run 生成的 PNG 图片卡片
+本文档是项目当前状态（Phase 0–3 完成后）的单一综合描述。快速开始、启动命令、目录树见 [README.md](README.md)，本文补齐设计、契约、存储、管道细节。
 
 ---
 
-## 二、目录结构
+## 1. 项目定位
 
-```
-society-analysis-project-update/
-│
-├── main.py                  # 入口：解析 CLI 参数，组装服务，调用 PlannerAgent
-├── config.py                # 全局配置（从 .env 加载）；含 RUNS_DIR
-│
-├── agents/                  # 业务逻辑层（每个 Agent 负责一个阶段）
-│   ├── planner.py           # ★ 核心：全流程编排，24 个 stage
-│   ├── ingestion.py         # 数据采集
-│   ├── knowledge.py         # 声明提取、去重、三级证据检索
-│   ├── analysis.py          # 传播分析、话题分析、级联预测、免疫策略
-│   ├── risk.py              # 风险评估
-│   ├── counter_message.py   # 生成反制消息
-│   ├── critic.py            # 审核反制消息质量
-│   ├── visual.py            # 生成图片卡片（SD + Pillow）
-│   ├── report.py            # 组装最终报告（模板渲染 + LLM 包装 + 事实校验）
-│   └── community.py         # 社区检测（Louvain 算法）
-│
-├── services/                # 基础设施层（无业务逻辑，只封装外部系统）
-│   ├── reddit_service.py    # Reddit 公开 JSON API（无需密钥）
-│   ├── telegram_service.py  # Telegram MTProto（需 API ID/Hash）
-│   ├── x_api_service.py     # X (Twitter) API（需 Bearer Token）
-│   ├── chroma_service.py    # 向量数据库（帖子 / 声明 / 文章 三个集合）
-│   ├── kuzu_service.py      # 知识图谱（账号→帖子→声明→话题→证据）
-│   ├── postgres_service.py  # 关系型数据库（结构化存储）
-│   ├── embeddings_service.py # OpenAI text-embedding-3-small
-│   ├── news_search_service.py    # DuckDuckGo → 权威新闻文章（tier=news）
-│   ├── wikipedia_service.py      # Wikipedia REST API（tier=wikipedia）★P0-3
-│   ├── claude_vision_service.py  # Claude Vision：图片 OCR + 描述
-│   ├── stable_diffusion_service.py # SD 生成图片背景
-│   ├── whisper_service.py   # 视频转文字（Whisper）
-│   ├── monitor_service.py   # Watch 模式定时监控
-│   ├── counter_effect_service.py # 反制效果闭环追踪（SQLite）
-│   ├── manifest_service.py  # ★P0-2 run_id 产出 + run_manifest.json
-│   └── metrics_service.py   # ★P0-5 量化指标计算 + metrics.json
-│
-├── models/                  # 数据结构定义（Pydantic）
-│   ├── post.py              # Post、ImageAsset
-│   ├── claim.py             # Claim、ClaimEvidence（含 source_tier）
-│   ├── report.py            # IncidentReport、PropagationSummary、TopicSummary
-│   ├── risk_assessment.py   # RiskAssessment、RiskLevel
-│   ├── community.py         # CommunityAnalysis、EchoChamberScore
-│   ├── persuasion.py        # PersuasionFeatures、CascadePrediction、NamedEntity
-│   ├── immunity.py          # ImmunityStrategy、ImmunizationTarget
-│   ├── counter_effect.py    # CounterEffectRecord、CounterEffectReport
-│   └── manifest.py          # ★P0-2 RunManifest
-│
-├── api/                     # ★P0-6 FastAPI 只读查询层（禁止 import agents/services）
-│   ├── app.py               # FastAPI 入口；CORS 限 127.0.0.1:8501
-│   └── routes/
-│       ├── runs.py          # GET /runs, GET /runs/{run_id}
-│       └── artifacts.py     # /report /raw /metrics /visual/{filename}
-│
-├── ui/                      # ★P0-6 Streamlit 研究型前端
-│   ├── streamlit_app.py     # 入口 + 健康检查
-│   ├── api_client.py        # 对 api/ 的 requests 封装
-│   ├── pages/
-│   │   ├── 1_Run_List.py    # 所有 run 的摘要表
-│   │   └── 2_Run_Detail.py  # 单个 run 5 个 tab（Report / Community / Emotion / Counter-visuals / Raw JSON）
-│   └── components/
-│       ├── metric_cards.py
-│       ├── community_graph.py
-│       └── emotion_chart.py
-│
-├── db/
-│   ├── schema.sql           # PostgreSQL 建表脚本
-│   └── migrate.py           # 执行迁移：python db/migrate.py
-│
-├── scripts/
-│   ├── seed_knowledge.py    # 预热：向 Chroma 批量导入已知文章
-│   ├── telegram_login.py    # 首次 Telegram 登录（生成 session 文件）
-│   └── telegram_find_channels.py # 搜索 Telegram 频道
-│
-├── data/                    # 运行时数据（gitignore）
-│   ├── runs/                # ★P0-2 每次 run 的 artifact 目录
-│   │   └── {run_id}/        # run_id = YYYYMMDD-HHMMSS-{6位hash}
-│   │       ├── run_manifest.json
-│   │       ├── report.md
-│   │       ├── report_raw.json
-│   │       ├── metrics.json
-│   │       └── counter_visuals/*.png
-│   ├── chroma/              # 向量数据库持久化
-│   ├── kuzu_graph/          # 知识图谱持久化
-│   ├── counter_visuals/     # 老的全局图片目录（向后兼容回落）
-│   ├── counter_effects.db   # 反制效果 SQLite 数据库（跨 run 持久化）
-│   └── raw_media/           # 下载的媒体文件
-│
-├── project_report.tex       # 学术项目报告（LaTeX 单文件）
-├── PROJECT_ANALYSIS_AND_PLAN.md # P0/P1 修改方案
-├── ROADMAP.md               # 路线图
-└── .env                     # 密钥配置（不提交 git）
-```
+两条互不干扰的路径：
+
+| 路径 | 入口 | 产出 | 角色 |
+| --- | --- | --- | --- |
+| **Precompute Pipeline** | `python main.py …` → `agents/planner.py`（24 stage） | `data/runs/{run_id}/` 5 件 artefact | 数据层 — 提供"已经算好的分析状态"；种群级统计、聚类、社区、传播指标必须在此批处理产出 |
+| **Interactive Agent** | `POST /chat/query` → `agents/chat_orchestrator.py` | session JSON + 自然语言回答 + 可选图卡 | 会话层 — 把 run artefact 按用户问题即时转成可读回答，**不触发新 precompute**，只查已有数据 |
+
+核心判断：
+- Precompute 是批处理 — 一次 run 全量跑 24 stage，是因为下游指标（misinfo_risk、community_modularity、bridge_influence_ratio）都是 population-level，必须先聚类/建图才能回答"谁在带动这个主题"。
+- Chat 是懒执行 — 用户问到哪一个方面才调哪一个 Capability；同一 run 的 claim/topic 可被反复问而不重跑。
 
 ---
 
-## 三、数据存储说明
+## 2. 架构分层
 
-系统使用**四种数据库 + 一类 artifact 目录**，各有分工：
+```
+            ┌────────────────────────── UI ─────────────────────────┐
+            │ Streamlit                                              │
+            │   ui/pages/0_Chat.py          ← 默认主入口（chat-first）│
+            │   ui/pages/1_Run_List.py      ← run 列表（研究视图）    │
+            │   ui/pages/2_Run_Detail.py    ← run 详情（研究视图）    │
+            │   ui/components/chat_response.py  (inline per-turn)    │
+            │   ui/components/analysis_tabs.py  (right-panel 5 tabs) │
+            └──────────────────▲─────────────────────────────────────┘
+                               │ HTTP
+            ┌──────────────────┴──────────────── API (FastAPI) ─────┐
+            │ api/routes/chat.py          POST /chat/query           │
+            │ api/routes/runs.py          GET  /runs, /runs/{id}/*   │
+            │ api/routes/capabilities.py  POST /capabilities/<name>  │
+            │ api/routes/artifacts.py     GET  /artifacts/{run}/...  │
+            └──────────────────▲─────────────────────────────────────┘
+                               │
+        ┌──────────────────────┴──────────────── Agent ─────────────┐
+        │ agents/chat_orchestrator.py                                │
+        │   → agents/router.py           (intent 分类)                │
+        │   → capabilities/*             (领域任务闭环)                │
+        │   → services/answer_composer.py (capability → 自然语言)     │
+        │   → services/session_store.py   (会话 JSON 持久化)          │
+        └──────────────────▲─────────────────────────────────────────┘
+                           │
+        ┌──────────────────┴──────────────── Capability ────────────┐
+        │ capabilities/topic_overview_capability.py                  │
+        │ capabilities/emotion_insight_capability.py                 │
+        │ capabilities/claim_status_capability.py                    │
+        │ capabilities/propagation_insight_capability.py             │
+        │ capabilities/visual_summary_capability.py                  │
+        │ capabilities/run_compare_capability.py                     │
+        │ capabilities/explain_decision_capability.py                │
+        └──────────────────▲─────────────────────────────────────────┘
+                           │
+        ┌──────────────────┴──────────────── Tool (Pydantic) ───────┐
+        │ tools/run_query_tools.py    list_runs / get_run_summary /  │
+        │                             get_topics / get_claims /       │
+        │                             get_claim_details               │
+        │ tools/evidence_tools.py     retrieve_evidence_chunks /      │
+        │                             retrieve_official_sources       │
+        │ tools/graph_tools.py        query_topic_graph /             │
+        │                             get_social_metrics /            │
+        │                             get_propagation_summary         │
+        │ tools/decision_tools.py     get_intervention_decision /     │
+        │                             get_counter_effect_history      │
+        │ tools/visual_tools.py       generate_clarification_card /   │
+        │                             generate_evidence_context_card  │
+        └──────────────────▲─────────────────────────────────────────┘
+                           │
+        ┌──────────────────┴──────────────── Services / Storage ────┐
+        │ ChromaService · KuzuService · PostgresService · SQLite     │
+        │ EmbeddingsService · StableDiffusionService                 │
+        │ WikipediaService · NewsSearchService · CounterEffectService│
+        │ data/runs/ · data/sessions/ · data/chroma/ · data/kuzu_graph│
+        └────────────────────────────────────────────────────────────┘
+                           │
+        ┌──────────────────┴──────────────── Precompute (批) ────────┐
+        │ agents/planner.py              24 stage 主干                │
+        │ agents/{ingestion, knowledge, analysis, community, risk,   │
+        │         visual, report, counter_message, critic}           │
+        │ 触发：CLI (main.py) / fixture / 定时任务                    │
+        │ Chat 路径**不会**触发这里                                   │
+        └────────────────────────────────────────────────────────────┘
+```
 
-| 存储 | 类型 | 存储内容 | 用途 |
-|--------|------|----------|------|
-| **Chroma** | 向量数据库（本地文件） | 帖子 / 声明 / 文章的向量嵌入 | 语义相似度搜索、证据召回 |
-| **Kuzu** | 图数据库（本地文件） | 账号→帖子→声明→话题→证据 的关系图 | 传播路径、协调行为、社区检测 |
-| **PostgreSQL** | 关系型数据库（Docker） | 帖子、账号、声明、报告的结构化数据 | 持久化存储、统计查询 |
-| **SQLite** | 轻量文件数据库 | 反制消息部署记录和效果数据 | 跨 run 的闭环效果追踪 |
-| **`data/runs/{run_id}/`** | 文件目录 | 每次 run 的 5 件 artifact | 可复现性、UI 只读数据源 |
+### 分层契约（强约束）
+
+1. **Router / ChatOrchestrator** 不得 `import services.chroma_service`，也不得读 `data/runs/*.json` —— 全部走 Capability → Tool。
+2. **Capability** 必须返回 Pydantic Output 对象，不返回 dict / raw LLM string。
+3. **Tool** 不做业务判断（`retrieve_evidence_chunks` 不判断 stance；`generate_visual_card` 不判断 decision）。
+4. **AnswerComposer** 只把 Capability 输出翻译成自然语言，不引入新的 LLM 推理。
+5. **Chat 主链路 LLM 调用 ≤ 3**：Router + 可选 Capability LLM + AnswerComposer。
+6. **Precompute Pipeline 完整保留**：`agents/planner.py` 一行未动。
 
 ---
 
-## 四、完整运行流程（24 个 stage）
+## 3. Precompute Pipeline（24 stage 概览）
 
-流水线由 `PlannerAgent.run()` 按顺序编排，每个阶段的结果都写进结构化的 `IncidentReport`，最后由 `ReportAgent` 模板渲染成 Markdown。
+入口 `agents/planner.py::PlannerAgent.run()`。一次 run 的完整阶段（condensed）：
 
-```
-┌─────────────────────────────────────────────────────────┐
-│ 0. ManifestService.new_run()                            │
-│    → 创建 data/runs/{run_id}/，记录输入参数/模型/阈值/git │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 1. 意图分类（Claude LLM）                                │
-│    → TREND_ANALYSIS / CLAIM_ANALYSIS / COUNTER_MESSAGE  │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 2. 数据采集（IngestionAgent）                            │
-│    Reddit(--subreddit) > Telegram > X API > JSONL        │
-│    → 帖子存入 Chroma + Kuzu + PostgreSQL                │
-│    → posts_snapshot_sha256 计入 manifest                │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 3. 情绪分类（前 50 帖 · fear/anger/hope/disgust/neutral）│
-│ 3b. 声明提取 + 两阶段去重（向量 0.92 + LLM 判断）         │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 4. 传播分析（AnalysisAgent）                             │
-│    速度、立场分布、异常、协调对、账号角色分类             │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 5. 话题聚类（LLM）+ 话题级指标/情绪分布                  │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 6. 三级证据检索 ★P0-3                                    │
-│    6a. News 抓取 → Chroma articles（预热）              │
-│    6b. Chroma 向量匹配 → tier=internal_chroma            │
-│    6c. 若零证据：Wikipedia → tier=wikipedia              │
-│    6d. 若零证据且有 NEWSAPI_KEY：NewsAPI → tier=news    │
-│    ClaimEvidence.source_tier 标注来源                   │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 7. 风险评估 + 风险门控（RiskAgent）                      │
-│    → misinfo_score + RiskLevel                          │
-│    → INSUFFICIENT_EVIDENCE 路由人工审核                 │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 8. 反制消息生成 ★P0-4 改进：actionable 门控             │
-│    触发条件：primary_claim.has_actionable_counter_       │
-│    evidence() 即 ≥1 contradicting_evidence              │
-│    否则 → skip；counter_message_skip_reason 记录原因：   │
-│      no_primary_claim / no_risk_assessment /           │
-│      insufficient_evidence / no_actionable_counter_     │
-│      evidence / risk_gate_not_triggered / unknown       │
-│    生成后 CriticAgent 审核，最多重试 2 次                │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 9. 并行阶段：                                            │
-│    9a. Visual Card（SD 背景 + Pillow 文字）              │
-│    9b. Topic Cards（每个热门话题一张）                   │
-│    9c. 社区检测（Louvain + modularity Q）               │
-│    9d. 级联预测（24h 传播量）                            │
-│    9e. 说服手法识别                                      │
-│    9f. 实体提取 + 共现                                   │
-│    9g. 反制定向计划                                      │
-│    9h. 免疫策略推荐                                      │
-│    9i. ★P0-4 反制效果闭环：                             │
-│        · 先扫描 get_pending_followups()                 │
-│        · 对匹配当前 topic/claim 的 PENDING 调用          │
-│          record_followup() 生成 effect_score → 转       │
-│          EFFECTIVE / NEUTRAL / BACKFIRED                │
-│        · 同时 record_deployment() 新 baseline           │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 10. 报告生成 ★P0-1 模板化                               │
-│     _render_body(report_obj) → 100% 代码渲染所有         │
-│     结构性段落（Claim / Evidence / Propagation /        │
-│     Emotion / Risk / Cascade / Persuasion / Community / │
-│     Counter-Messaging / Immunity / Counter-Effect /     │
-│     Run Metrics）                                       │
-│     _llm_wrap() 仅写 Executive Summary + Flags and      │
-│     Next Steps 两节（temp=0.3, max_tokens=512）          │
-│     _verify_report_facts() 正则扫 LLM 段与结构化         │
-│     对象对比；不一致 → 回落到纯模板渲染                  │
-│     → 写 run_dir/report.md + report_raw.json            │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 11. MetricsService.compute() + write() ★P0-5           │
-│     evidence_coverage / evidence_tier_distribution /    │
-│     community_modularity_q / account_role_counts /      │
-│     counter_effect_closed_loop_rate /                   │
-│     actionable_counter_evidence_rate / risk_level /     │
-│     post_count / topic_count / counter_message_         │
-│     deployed / counter_message_skip_reason              │
-│     → 写 run_dir/metrics.json                           │
-└────────────────────────┬────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│ 12. ManifestService.finalize()                          │
-│     → posts_snapshot_sha256 + finished_at + report_id   │
-│     → 写 run_dir/run_manifest.json                      │
-└─────────────────────────────────────────────────────────┘
-```
+| # | Stage | 关键输出 |
+|---|---|---|
+| 1 | fetch_posts | Reddit / Telegram / fixture JSON → 原始 post 流 |
+| 2 | ingest | `PostgresService` 写入（不可用时降级 SQLite）；`ChromaService` 向量化 |
+| 3 | normalize | 统一 schema（post_id, author, text, ts, subreddit/chat） |
+| 4 | emotion_baseline | 每条 post 基础情绪打分 |
+| 5 | claim_extract | 抽取候选 claim + 归一化 + 去重（`unique_claims`） |
+| 6 | actionability | 判定 `claim_actionability ∈ {actionable, non_actionable, insufficient_evidence}` + `non_actionable_reason` |
+| 7 | evidence_gather | 按 claim 向 Chroma 查 evidence_chunks；Wikipedia + NewsSearch 补官方源 |
+| 8 | stance_score | evidence 对 claim 的立场：`supporting / contradicting / uncertain` |
+| 9 | tier_classify | evidence tier：`official / reputable_media / user_generated / low_credibility` |
+| 10 | claim_verdict | 5 档裁决：`supported / contradicted / disputed / insufficient / non_factual` |
+| 11 | topic_cluster | 对全量 post 做嵌入聚类 → `TopicSummary[]` |
+| 12 | topic_rollup | 每 topic 的 `post_count / velocity / dominant_emotion / emotion_distribution / misinfo_risk` |
+| 13 | community_detect | Louvain / Leiden 社区检测 → `CommunityAnalysis.communities` |
+| 14 | account_roles | 账户分类（`originator / amplifier / bridge / commentator / ...`） |
+| 15 | bridge_influence | `bridge_influence_ratio` + `role_risk_correlation` |
+| 16 | propagation_summary | `PropagationSummary`：协同对、速度、跨社区桥 |
+| 17 | coordinated_detect | 时间窗口内的可疑同步发帖 |
+| 18 | intervention_decide | `InterventionDecision`：`rebut / clarify / abstain` + `decision_reason` |
+| 19 | counter_message | 若决定干预 — 生成反制文案（`agents/counter_message.py`） |
+| 20 | critic_review | 对反制文案的自我审查 |
+| 21 | visual_cards | 分支：rebut → Clarification Card PNG；clarify → Evidence Context Card PNG；abstain → 结构化 abstention_block 文本 |
+| 22 | metrics_aggregate | `services/metrics_service.py` 汇总 → `metrics.json` |
+| 23 | report_render | `agents/report.py` → `report.md` + `report_raw.json` |
+| 24 | manifest_write | `services/manifest_service.py` → `run_manifest.json`（schema_version / inputs / outputs hash / timestamps） |
 
----
-
-## 五、CLI 使用方式
-
-```bash
-cd society-analysis-project-update
-
-# 分析 Reddit 某 subreddit（最常用）
-python main.py \
-  --subreddit "worldnews" \
-  --query "Analyze trending misinformation on worldnews"
-
-# 运行后将在 data/runs/{run_id}/ 下产出 5 件 artifact
-# 无需传 --output-json：默认写到 run_dir/report_raw.json
-
-# 若仍想输出到指定路径（向后兼容）
-python main.py \
-  --subreddit "worldnews" \
-  --output-json ./output.json \
-  --output-md ./report.md
-# 此时同时写 run_dir 和指定路径
-
-# 多 subreddit
-python main.py --subreddit "worldnews,politics,conspiracy"
-
-# Telegram
-python main.py --channel "RealHealthRanger"
-
-# 离线 JSONL
-python main.py --query "vaccine misinformation" --jsonl data/sample_posts.jsonl
-
-# Watch 模式
-python main.py --subreddit "worldnews" --watch --interval 300
-```
-
-**退出码：** `0` 正常；`1` 需要人工审核（INSUFFICIENT_EVIDENCE 或高风险）
-
----
-
-## 六、研究型 UI（P0-6）
-
-两个进程，只读 `data/runs/`：
-
-```bash
-# 终端 1：启动 FastAPI
-uvicorn api.app:app --port 8000
-
-# 终端 2：启动 Streamlit
-streamlit run ui/streamlit_app.py
-# 浏览器打开 http://localhost:8501
-```
-
-**页面：**
-- **Run List** — 所有 run 的摘要表（run_id / started_at / query / posts / metrics）
-- **Run Detail** — 选中某 run 后展开 5 个 tab：
-  - Report：`report.md` 原文
-  - Community：社区列表、size、dominant_emotion、echo_chamber、accounts
-  - Emotion：各话题的情绪分布堆叠柱状图（Plotly）
-  - Counter-visuals：本次生成的 PNG
-  - Raw JSON：完整 `report_raw.json`
-- 顶部指标卡：evidence_coverage / community_Q / closed_loop_rate / post_count
-
-**架构约束：** `api/` 与 `ui/` 禁止 `import agents/*` 或 `services/*` —— UI 与业务逻辑完全解耦，只能通过文件系统读 artifact。
-
-**API 端点：**
-- `GET /runs` — 所有 run 的摘要
-- `GET /runs/{run_id}` — manifest + metrics + artifact 存在标志
-- `GET /runs/{run_id}/report` — report.md 原文
-- `GET /runs/{run_id}/raw` — report_raw.json
-- `GET /runs/{run_id}/metrics` — metrics.json
-- `GET /runs/{run_id}/visual/{filename}` — PNG（含路径穿越防护）
-
----
-
-## 七、配置（.env 文件）
-
-```env
-# 必填
-ANTHROPIC_API_KEY=sk-ant-...
-
-# PostgreSQL（Docker 容器）
-POSTGRES_DSN=postgresql://society:society_pass@localhost:5432/society_db
-
-# 可选：Reddit 代理（如果被封锁）
-REDDIT_PROXY=http://127.0.0.1:7890
-
-# 可选：Telegram
-TELEGRAM_API_ID=12345678
-TELEGRAM_API_HASH=abcdef...
-
-# 可选：X (Twitter) API
-X_BEARER_TOKEN=...
-
-# 可选：OpenAI 嵌入（不填则降级到 sentence-transformers）
-OPENAI_API_KEY=sk-...
-
-# 可选：NewsAPI（启用 tier=news 兜底检索）
-NEWSAPI_KEY=...
-
-# 可选：UI 指向自定义 runs 目录
-RUNS_DIR=D:\path\to\custom\runs
-# API 供 UI 调用的基地址（ui/api_client.py 读取）
-RESEARCH_API_BASE=http://127.0.0.1:8000
-```
-
----
-
-## 八、数据源优先级
-
-```
---subreddit 参数 → reddit_service.py（公开 API，无需密钥）
---channel 参数   → telegram_service.py（需配置凭据）
---query 参数     → Telegram(若配置) → X API(若配置) → 空列表
---jsonl 参数     → x_api_service.load_from_jsonl()（离线）
-```
-
----
-
-## 九、输出文件说明
-
-**每次 run 的 artifact 目录（推荐以此为准）：**
+### Run artefact（`data/runs/{run_id}/`）
 
 | 文件 | 内容 |
-|------|------|
-| `data/runs/{run_id}/run_manifest.json` | 输入参数、模型、阈值、git sha、posts 快照哈希 |
-| `data/runs/{run_id}/report.md` | 模板渲染的 Markdown 报告 |
-| `data/runs/{run_id}/report_raw.json` | 完整 IncidentReport（Pydantic model_dump） |
-| `data/runs/{run_id}/metrics.json` | 量化指标 |
-| `data/runs/{run_id}/counter_visuals/*.png` | 本次生成的图片卡片 |
+|---|---|
+| `run_manifest.json` | schema 版本、输入、产物哈希、阶段时间戳 |
+| `report.md` | 面向人读的 Markdown 报告 |
+| `report_raw.json` | `IncidentReport` Pydantic 序列化 — chat 层的核心数据源；含 `claims: list[Claim]`（结构化）、`topic_summaries`、`community_analysis`、`propagation_summary`、`intervention_decision`、`counter_message`、`critic_review` |
+| `metrics.json` | 聚合指标：`misinfo_risk` / `bridge_influence_ratio` / `role_risk_correlation` / `community_modularity_q` / `account_role_counts` / `claim_verdict_counts` |
+| `counter_visuals/` | PNG 图卡（Clarification / Evidence Context Cards） |
 
-**跨 run 持久化：**
+### 数据契约要点
 
-| 文件 | 内容 |
-|------|------|
-| `data/chroma/` | 向量数据库（帖子 / 声明 / 文章） |
-| `data/kuzu_graph/` | 知识图谱（账号/帖子/声明/话题/证据） |
-| `data/counter_effects.db` | 反制效果 SQLite 数据库（闭环追踪依赖） |
-
-**向后兼容的全局路径（若用户显式指定）：**
-`--output-json` / `--output-md` 指向任意路径；`data/counter_visuals/` 作为回落目录（run_dir 为 None 时使用）。
+- `IncidentReport.claims: list[Claim]`（Phase 0 完成的数据模型升级）—— 每个 Claim 带 `claim_id / normalized_text / claim_actionability / non_actionable_reason / supporting_evidence / contradicting_evidence / evidence_tiers / evidence_summary()`。旧的 `list[str]` 已全量迁移。
+- `TopicSummary` 含 `dominant_emotion` + `emotion_distribution` + `representative_claims`，EmotionInsightCapability 直接复用。
+- `PropagationSummary` 含 `bridge_accounts / coordinated_pairs / account_role_counts`，PropagationInsightCapability 直接复用。
 
 ---
 
-## 十、metrics.json 字段说明
+## 4. Storage Layer
 
-| 字段 | 含义 |
-|------|------|
-| `evidence_coverage` | 有至少 1 条证据的 claim 占比 ∈ [0,1] |
-| `evidence_with_any` / `evidence_total_claims` | 分子/分母 |
-| `evidence_tier_distribution` | `{internal_chroma, wikipedia, news}` 三级来源计数 |
-| `community_modularity_q` | Louvain Q 值；社区检测未启用时为 null |
-| `account_role_counts` | `{ORIGINATOR, AMPLIFIER, BRIDGE, PASSIVE, ...}` |
-| `counter_effect_closed_loop_rate` | 跨 run 闭环率 `(total - pending) / total` |
-| `counter_effect_summary` | total_tracked / effective / neutral / backfired / 均分 |
-| `counter_message_deployed` | 本次是否部署了反制消息（bool） |
-| `counter_message_skip_reason` | 若未部署，原因枚举 |
-| `actionable_counter_evidence_rate` | 有 ≥1 contradicting 的 claim 占比 — 诊断立场分类器是否过度保守 |
-| `risk_level` / `post_count` / `topic_count` | 基础统计 |
+| 存储 | 用途 | 路径 / 连接 |
+|---|---|---|
+| **Filesystem** | run artefact、session、运行时日志 | `data/runs/` · `data/sessions/` · `sample_runs/` |
+| **Chroma** | evidence RAG（post 嵌入 + 官方源嵌入） | `data/chroma/`（本地持久化）|
+| **Kuzu** | 图数据（社区结构快照，可选） | `data/kuzu_graph/` |
+| **PostgreSQL** | 原始 post 落盘（可选；不可用时降级 SQLite） | `.env::POSTGRES_*` |
+| **SQLite** | Postgres 不可用时的 fallback；counter_effect 历史 | `data/app.sqlite` |
+| **内存 NetworkX** | Chat 层按需重建的社交图（`@lru_cache(maxsize=8)`），规避图数据库部署 | `tools/graph_tools.py::query_topic_graph` |
+
+首版 session state 为 JSON 文件（`data/sessions/{session_id}.json`），无并发锁 —— 单用户单机场景足够。
 
 ---
 
-## 十一、各阶段状态
+## 5. Capability × Tool 矩阵
 
-| status | 含义 |
-|--------|------|
-| `ok` | 正常完成 |
-| `degraded` | 完成但结果不完整 |
-| `error` | 异常，但流程继续（非致命） |
-| `blocked` | 门控拦截，流程提前退出（如 counter_message 被 actionable 门控） |
+### 7 个 Capability
+
+| Intent | Capability | 典型问题 | 调用的 Tool |
+|---|---|---|---|
+| `topic_overview` | `TopicOverviewCapability` | 今天讨论了什么 / what's trending | `list_runs` + `get_topics` |
+| `emotion_analysis` | `EmotionInsightCapability` | 情绪怎么样 / 哪个话题最愤怒 | `get_topics` |
+| `claim_status` | `ClaimStatusCapability` | X 这个说法有证据吗 / fact check | `get_claims` + `get_claim_details` + `retrieve_evidence_chunks` + `get_intervention_decision` |
+| `propagation_analysis` | `PropagationInsightCapability` | 谁在带动这个主题 / 是否协同 | `query_topic_graph` + `get_social_metrics` |
+| `visual_summary` | `VisualSummaryCapability` | 用一张图总结 / 出张反驳卡 | `get_primary_claim` + `get_claim_details` + `retrieve_evidence_chunks` + `get_intervention_decision` + `generate_clarification_card` / `generate_evidence_context_card` |
+| `run_compare` | `RunCompareCapability` | 这次和上次比变化大吗 | `list_runs` + `get_run_summary` + `get_social_metrics` |
+| `explain_decision` | `ExplainDecisionCapability` | 为什么要（不要）反制 | ClaimStatus + `get_intervention_decision` + 可选 visual |
+
+每个 Capability 的 **Input / Output 都是 Pydantic BaseModel**，可独立单元测试。LLM 调用只出现在需要自然语言合成的环节（`interpretation` / `verdict_summary` / `narrative`），`temperature ≤ 0.3`。
+
+### 12 个 Tool
+
+分 5 个文件：
+
+- **`tools/run_query_tools.py`** — `list_runs` / `get_run_summary` / `get_topics` / `get_claims` / `get_claim_details` / `get_primary_claim`
+- **`tools/evidence_tools.py`** — `retrieve_evidence_chunks`（封装 `ChromaService.query_articles`）/ `retrieve_official_sources`（封装 Wikipedia + NewsSearch）
+- **`tools/graph_tools.py`** — `query_topic_graph`（内存 NetworkX，从 `report_raw.json::community_analysis + propagation_summary` 按需重建，`lru_cache(maxsize=8)`）/ `get_social_metrics` / `get_propagation_summary`
+- **`tools/decision_tools.py`** — `get_intervention_decision` / `get_counter_effect_history`
+- **`tools/visual_tools.py`** — thin wrapper 调 `agents/visual.py::generate_clarification_card` / `generate_evidence_context_card`
 
 ---
 
-## 十二、快速启动（首次部署）
+## 6. Chat Orchestrator 主链路
 
-```bash
-# 1. 启动 PostgreSQL
-docker run -d --name society-pg --restart unless-stopped \
-  -e POSTGRES_USER=society -e POSTGRES_PASSWORD=society_pass \
-  -e POSTGRES_DB=society_db -p 5432:5432 postgres:16
-
-# 2. 数据库迁移
-python db/migrate.py
-
-# 3. 配置 .env（至少 ANTHROPIC_API_KEY）
-
-# 4. 安装依赖
-pip install -e .
-
-# 5. 第一次 run
-python main.py --subreddit "worldnews" \
-  --query "Analyze trending misinformation on worldnews"
-
-# 6. （可选）启动研究 UI
-uvicorn api.app:app --port 8000 &
-streamlit run ui/streamlit_app.py
+```
+POST /chat/query {session_id, message}
+  ↓
+session = SessionStore.load(session_id)
+  ↓
+router_out = Router.classify(message, session_context)
+   # → {intent, targets={run_id?, topic_id?, claim_id?}, confidence}
+  ↓
+capability = CAPABILITY_REGISTRY[intent]
+cap_output = capability.run(CapabilityInput(**targets))
+  # → Pydantic Output（CapabilityInput 从 session 继承 current_* 做 followup）
+  ↓
+answer_text = AnswerComposer.compose(message, cap_output, session_context)
+  ↓
+SessionStore.append_turn(user_msg, assistant_reply, capability_used)
+  ↓
+return ChatResponse(answer_text, capability_used, capability_output, visual_paths)
 ```
 
+### Router 意图分类
+
+8 个 intent：`topic_overview` · `emotion_analysis` · `claim_status` · `propagation_analysis` · `visual_summary` · `run_compare` · `explain_decision` · `followup`（读 session state，延用上一 capability）。输出：
+
+```python
+class RouterOutput(BaseModel):
+    intent: Literal[...]
+    targets: RouterTargets  # run_id / topic_id / claim_id 全可选
+    confidence: float
+    fallback_reason: Optional[str]
+```
+
+LLM 模式 `response_format={"type": "json_object"}`，默认 `OPENAI_MODEL=gpt-4o`，`temperature=0`。
+
+### Session State（`data/sessions/{session_id}.json`）
+
+```json
+{
+  "session_id": "s-abc123",
+  "created_at": "2026-04-22T10:00:00Z",
+  "current_run_id": "20260421-231801-6afd7c",
+  "current_topic_id": null,
+  "current_claim_id": "c1",
+  "recent_visuals": ["data/runs/.../counter_visuals/c1_clarification.png"],
+  "conversation": [
+    {"role": "user", "content": "what's trending?", "capability_used": null, "at": "..."},
+    {"role": "assistant", "content": "...", "capability_used": "topic_overview", "at": "..."}
+  ]
+}
+```
+
+`current_*` 字段让后续问句（"那这个话题的情绪呢"）无需重新指定目标 —— Router 检测到 followup 意图时直接从 session 继承。
+
 ---
 
-## 十三、Phase 功能对照
+## 7. UI — 三栏 Chat Workspace + 5-tab 分析面板
 
-| Phase | 功能 | 状态 |
-|-------|------|-----|
-| **Phase 0** | 情绪分类、账号角色分类 | ✅ 完成 |
-| **Phase 1** | 社区检测（Louvain）、回音室、影响力 | ✅ 完成 |
-| **Phase 2** | 级联预测、说服手法、实体提取、反制定向 | ✅ 完成 |
-| **Phase 3** | 免疫策略、反制效果闭环追踪 | ✅ 完成 |
-| **P0-1** | report 模板化 + LLM 仅包装摘要 + 事实校验 | ✅ 完成 |
-| **P0-2** | run_manifest + `data/runs/{run_id}/` 目录 | ✅ 完成 |
-| **P0-3** | Wikipedia 三级证据召回 + source_tier | ✅ 完成 |
-| **P0-4** | counter_effect 跨 run 闭环 | ✅ 完成 |
-| **P0-5** | metrics.json（11 项指标） | ✅ 完成 |
-| **P0-6** | 研究型 UI（FastAPI + Streamlit） | ✅ 完成 |
-| **P0 额外** | actionable counter-evidence 门控 + skip_reason | ✅ 完成 |
-| **P1-1** | Trust score（`agents/trust.py`） | ⏳ 下一轮 |
-| **P1-2** | persuasion n-gram 引用 | ⏳ 下一轮 |
-| **P1-3** | `--dry-run` / `--skip-stage` CLI 开关 | ⏳ 下一轮 |
-| **P1-4** | Claim Inspector + 人工审阅 UI + `claim_reviews` 表 | ⏳ 下一轮 |
+`ui/pages/0_Chat.py` 是默认主入口，布局：
+
+```
+┌──────────────┬────────────────────────────┬────────────────────────┐
+│ st.sidebar   │   Conversation (chat_col)  │  Analysis (analysis_col)│
+│              │                            │                         │
+│ - session id │ - st.chat_message stream   │ st.tabs([Evidence,      │
+│ - breadcrumb │ - Structured output        │           Topic,        │
+│   current_*  │   expander (per-turn       │           Graph,        │
+│ - New session│   render_capability_output)│           Metrics,      │
+│ - prompt     │ - st.chat_input            │           Visual])      │
+│   chips      │                            │                         │
+│ - API health │                            │ 每次 capability 回答    │
+│              │                            │ 通过 route_capability_  │
+│              │                            │ to_panels() 写入         │
+│              │                            │ st.session_state[       │
+│              │                            │   "panel_<key>"]        │
+└──────────────┴────────────────────────────┴────────────────────────┘
+```
+
+实现：`st.columns([3, 2], gap="large")` 分 Conversation + Analysis 两栏，`st.sidebar` 负责 session 控制。
+
+### 右侧 5 个 Tab 与 Capability 映射
+
+`ui/components/analysis_tabs.py::route_capability_to_panels(cap_name, output)`：
+
+| Capability | Evidence | Topic | Graph | Metrics | Visual |
+|---|:---:|:---:|:---:|:---:|:---:|
+| `topic_overview` | | ✓ | | | |
+| `emotion_analysis` | | ✓ | | | |
+| `claim_status` | ✓ | ✓ | | | |
+| `propagation_analysis` | | | ✓ | ✓ | |
+| `visual_summary` | | | | | ✓ |
+| `run_compare` | | | | ✓ | |
+| `explain_decision` | | ✓ | | | ✓（可选）|
+
+空状态给出引导问句；Tab 内有 badge / color coding：
+- **Verdict badges**：`supported` · `contradicted` · `disputed` · `insufficient` · `non_factual`（5 档，禁用"绝对真/假"）
+- **Visual status**：`rendered` / `abstained` / `no_decision` / `render_failed` / `insufficient_data`
+- **Run-compare arrows**：`↑ up` / `↓ down` / `→ flat` / `· unknown`
+
+### 辅助页面（Research 视图）
+
+- `ui/pages/1_Run_List.py` — run 目录浏览，列出 `data/runs/` + `sample_runs/`
+- `ui/pages/2_Run_Detail.py` — 单 run 深挖，嵌入 `metric_cards` / `community_graph` / `emotion_chart` 组件
 
 ---
 
-## 十四、信任层设计要点
+## 8. API 端点
 
-P0-1 的核心理念是**消除 LLM 对结构性结论的污染**，具体通过三道防线：
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| POST | `/chat/query` | 主对话入口 |
+| GET | `/chat/session/{id}` | 回读 session（UI breadcrumb 用） |
+| GET | `/runs` | 列 runs（data + sample，带 `source` 字段） |
+| GET | `/runs/{run_id}` | 单 run 摘要 |
+| GET | `/runs/{run_id}/report` | `report_raw.json` |
+| GET | `/runs/{run_id}/metrics` | `metrics.json` |
+| GET | `/artifacts/{run_id}/{path}` | PNG / 其他 artefact 透传 |
+| POST | `/capabilities/{name}` | 绕过 Router 直调某 Capability（调试 / 外部集成） |
+| GET | `/health` | 健康 + `runs_root` |
 
-1. **模板渲染** — `_render_body()` 把所有带数字/枚举的段落（claim 列表、证据 tier 分布、社区数/Q 值、速度、outcome 枚举等）100% 从结构化 `IncidentReport` 对象生成，LLM 接触不到这些字段。
-2. **LLM 受限** — 只让 LLM 写 Executive Summary 和 Flags and Next Steps 两节，`temperature=0.3`、`max_tokens=512`，system prompt 明确禁止修改其他节。
-3. **事实校验** — `_verify_report_facts()` 用正则扫 LLM 输出中的关键字段（community_count / post_count / velocity / effect_score / outcome 枚举），与结构化对象对比；差异 > 0 时 `log.error("report.fact_drift", ...)` 并回落到纯模板渲染。
+CORS 白名单：`http://127.0.0.1:8501` · `http://localhost:8501`。
 
-配合 `metrics.json` 里的 `actionable_counter_evidence_rate` 诊断指标，可以独立观察到**立场分类器是否把所有证据都路由到 "uncertain"**（高 evidence_coverage + 低 actionable_rate 即是信号），而不是等出现反制消息空洞化才发现。
+---
+
+## 9. CLI 模式
+
+`main.py` 支持以下模式，均产出 `data/runs/{timestamp}-{hash}/`：
+
+```bash
+# 从 Reddit 抓取
+python main.py --subreddit conspiracy --days 3
+
+# 从 Telegram 抓取（需 .env 配置）
+python main.py --telegram-channel @somechannel --days 1
+
+# 从 fixture JSON 跑（无需网络；用于测试）
+python main.py --claims-from tests/fixtures/claims_conspiracy_baseline.json
+
+# watch 模式 — 周期性重抓
+python main.py --subreddit conspiracy --watch --interval 3600
+```
+
+Chat 路径**不会**调用 `main.py` —— 它只读 `data/runs/` + `sample_runs/` 里已有的 artefact。
+
+---
+
+## 10. 测试
+
+```bash
+pytest tests/test_phase1_chat.py tests/test_phase2_chat.py tests/test_phase3_chat.py -v
+# 37 passed
+```
+
+- **Tools** 针对临时 `data/runs/` 目录跑，不碰真实 Chroma / Stable Diffusion
+- **LLM 调用**（Router / Composer / Emotion interpretation）在测试里全部 patch 掉
+- **Visual** 渲染 patch `VisualAgent`，不触发 Stable Diffusion
+- 固定 fixture：`tests/fixtures/claims_conspiracy_baseline.json`
+- 样例 run：`sample_runs/run_fixed_claims_baseline/` 可直接被 chat 查询（run 路由 fallback 到 sample_runs）
+
+---
+
+## 11. 设计约束（Hard Rules）
+
+1. **禁止图数据库** — NetworkX 按需重建 + `functools.lru_cache(maxsize=8)`。Phase 4 才会重估。
+2. **Chat 不触发 precompute** — `agents/chat_orchestrator.py` 禁止调 `PlannerAgent`；chat 只读 artefact。
+3. **Claim 裁决统一 5 档** — `supported / contradicted / disputed / insufficient / non_factual`；禁用"绝对真/假"语言。
+4. **Actionability 三档** — `actionable / non_actionable / insufficient_evidence`；`non_actionable` 必须带 `non_actionable_reason`。
+5. **Intervention Decision 先于 Visual** — VisualSummaryCapability 规则：`decision == rebut` → Clarification Card；`decision == clarify` → Evidence Context Card；`decision == abstain` → 结构化 `abstention_block` 文本，**不**硬出 PNG。
+6. **Tool 不做业务判断** — evidence retrieval 不裁决 stance；visual 不裁决 decision。
+7. **Capability 返回 Pydantic Output** — 禁止 dict / raw LLM string。
+8. **Router / Orchestrator 不 import services** — 必须走 Capability → Tool。
+9. **Chat 主链路 LLM ≤ 3 次** — Router + 可选 Capability + AnswerComposer。
+10. **Session state 首版 JSON 文件** — 无并发锁（单用户单机）。
+
+---
+
+## 12. 模块边界速查
+
+| 模块 | 职责 | 由谁调用 |
+|---|---|---|
+| `agents/planner.py` | Precompute 24 stage 主干 | CLI `main.py` 唯一调用方 |
+| `agents/{ingestion, knowledge, analysis, community, risk, visual, report, counter_message, critic}` | Precompute 的各 stage 执行者 | 只被 `planner.py` 调 |
+| `agents/router.py` | 意图分类（Chat 链路第 1 次 LLM） | `chat_orchestrator.py` |
+| `agents/chat_orchestrator.py` | Chat 入口、session 管理、Capability 分发 | `api/routes/chat.py` |
+| `capabilities/*.py` | 领域任务闭环，Pydantic I/O | `chat_orchestrator.py` + `api/routes/capabilities.py` |
+| `tools/*.py` | 原子查询 / 生成 | 只被 `capabilities/*` 调 |
+| `services/chroma_service.py` · `kuzu_service.py` · `postgres_service.py` | 存储层 | Precompute agent + Tool 层 |
+| `services/session_store.py` | session JSON 读写 | `chat_orchestrator.py` 唯一调用方 |
+| `services/answer_composer.py` | Capability → 自然语言（Chat 链路第 3 次 LLM） | `chat_orchestrator.py` 唯一调用方 |
+| `models/claim.py` · `report.py` · `community.py` | Pydantic 数据契约 | 全局共享 |
+| `models/session.py` · `chat.py` | 会话相关契约 | API + Orchestrator |
+| `skills/*/SKILL.md` | Claude Code markdown skill pack（文档用途） | 不被 Python 代码引用 |
+
+---
+
+## 13. 历史说明
+
+项目经历了以下主要阶段，现状是 Phase 0–3 全部完成：
+
+- **Phase 0** — 目录打底 + `IncidentReport.claims: list[str] → list[Claim]` 数据模型升级（sample runs 已重跑）
+- **Phase 1** — 垂直切片 A：`TopicOverview` + `EmotionInsight` + Chat 骨架
+- **Phase 2** — 垂直切片 B：`ClaimStatus` + `PropagationInsight` + 证据 / 图谱 Tool
+- **Phase 3** — 垂直切片 C：`VisualSummary` + `RunCompare` + 完整 Router / Composer + 三栏 UI
+- **Phase 4（未落地，备选）** — 真 MCP 协议包装、`POST /runs` 触发后台 precompute、Session 升级 SQLite、多轮复杂推理、人工 review loop
+
+原始设计文档（`interactive_agent_transformation_plan_skills_mcp.md` · `ui_design_plan.md` · 旧版 PROJECT_OVERVIEW）已合并到本文。
+
+---
+
+## 14. 关键文件索引
+
+| 主题 | 文件 |
+|---|---|
+| Chat 入口 | `agents/chat_orchestrator.py` · `agents/router.py` · `services/answer_composer.py` · `services/session_store.py` |
+| Capability | `capabilities/{topic_overview,emotion_insight,claim_status,propagation_insight,visual_summary,run_compare,explain_decision}_capability.py` · `capabilities/base.py` |
+| Tool | `tools/{run_query,evidence,graph,decision,visual}_tools.py` · `tools/base.py` |
+| Precompute | `agents/planner.py`（24 stage 主干）· `main.py`（CLI） |
+| 数据契约 | `models/{report,claim,community,session,chat}.py` |
+| API | `api/app.py` · `api/routes/{chat,runs,capabilities,artifacts}.py` |
+| UI | `ui/pages/{0_Chat,1_Run_List,2_Run_Detail}.py` · `ui/components/{chat_response,analysis_tabs,metric_cards,community_graph,emotion_chart}.py` |
+| 测试 | `tests/test_phase{1,2,3}_chat.py` · `tests/test_tools_*.py` · `tests/test_capabilities_*.py` · `tests/fixtures/` |
+| 样例 run | `sample_runs/run_fixed_claims_baseline/` · `sample_runs/run_live_demo/` |

@@ -67,6 +67,19 @@ class VisualSummaryOutput(CapabilityOutput):
 
 class VisualSummaryCapability(Capability):
     name = "visual_summary"
+    description = (
+        "Render a visual summary card for a topic or claim. Decision precedes "
+        "visual: rebut → Clarification Card PNG; clarify → Evidence Context "
+        "Card PNG; abstain → structured abstention_block (no PNG). Answers "
+        "'show me a summary card', 'render this claim', 'visualize topic X'."
+    )
+    example_utterances = [
+        "用一张图总结这个话题",
+        "render a summary card",
+        "给我看一张图",
+        "可视化一下",
+    ]
+    tags = ["visual", "image", "card", "sd"]
     Input = VisualSummaryInput
     Output = VisualSummaryOutput
 

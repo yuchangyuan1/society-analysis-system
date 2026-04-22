@@ -35,6 +35,18 @@ class TopicOverviewOutput(CapabilityOutput):
 
 class TopicOverviewCapability(Capability):
     name = "topic_overview"
+    description = (
+        "Return the top-K trending topics in a run, ranked by post_count / "
+        "velocity / misinfo_risk. Answers 'what are people discussing', "
+        "'what's hot today', or 'show me the topics in run X'."
+    )
+    example_utterances = [
+        "今天大家在讨论什么",
+        "什么话题最热",
+        "show me the top topics in the latest run",
+        "list the trending discussions",
+    ]
+    tags = ["topic", "overview", "trending"]
     Input = TopicOverviewInput
     Output = TopicOverviewOutput
 

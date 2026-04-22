@@ -74,11 +74,12 @@
 
 ```
 society-analysis-project-update/
-├── main.py                     入口（CLI → PlannerAgent）
+├── main.py                     入口（CLI → PrecomputePipeline）
 ├── config.py                   全局配置（.env 加载）
 │
 ├── agents/                     业务编排层
-│   ├── planner.py              ★ 24-stage precompute pipeline
+│   ├── precompute_pipeline.py  ★ 24-stage offline batch pipeline
+│   ├── planner.py              ★ online query planner (bounded DAG)
 │   ├── chat_orchestrator.py    ★ session-centric chat 入口
 │   ├── router.py               ★ intent 分类器（6 intents + followup）
 │   ├── ingestion / knowledge / analysis / risk / counter_message
@@ -210,7 +211,7 @@ pytest tests/test_phase1_chat.py tests/test_phase2_chat.py tests/test_phase3_cha
 ## 设计约束（来自 `interactive_agent_transformation_plan_skills_mcp.md`）
 
 - **不上图数据库**：NetworkX 按需重建 + `functools.lru_cache(maxsize=8)`。
-- **不触发 precompute**：Chat 只读 run artefact，不调 `PlannerAgent`。
+- **不触发 precompute**：Chat 只读 run artefact，不调 `PrecomputePipeline`。
 - **绝对真/假 禁用**：`ClaimStatusCapability` 只出 5 档 verdict（`supported / contradicted / disputed / insufficient / non_factual`）。
 - **Precompute Pipeline 完整保留**：`agents/planner.py` 一行未动，交互化改造只是在其输出上加一层。
 

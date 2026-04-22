@@ -7,7 +7,7 @@ Society Analysis Project — Complete Functional Test Suite
   - 所有 LLM 调用通过 unittest.mock.patch 拦截，返回预设 JSON
   - Kuzu / Chroma / Postgres 使用临时目录隔离，每个 TestCase 独立清理
   - Phase 3 Counter-Effect Service 使用内存 SQLite（:memory:）
-  - 端到端测试 (T09) 用 mock 走完完整 PlannerAgent.run() 并验证 IncidentReport 字段
+  - 端到端测试 (T09) 用 mock 走完完整 PrecomputePipeline.run() 并验证 IncidentReport 字段
 """
 from __future__ import annotations
 
@@ -579,7 +579,7 @@ class T07_MonitorService(unittest.TestCase):
     """Phase 3 — monitoring alert generation."""
 
     def _make_planner_mock(self, velocity=8.0, misinfo_risk=0.8, predicted_posts=350):
-        """Return a mock PlannerAgent whose run() returns a controlled IncidentReport."""
+        """Return a mock PrecomputePipeline whose run() returns a controlled IncidentReport."""
         from models.report import IncidentReport, TopicSummary
         from models.persuasion import CascadePrediction
         ts = TopicSummary(
@@ -772,11 +772,11 @@ class T08_KnowledgeAgent(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# T09  End-to-end PlannerAgent.run() with full mocking
+# T09  End-to-end PrecomputePipeline.run() with full mocking
 # ══════════════════════════════════════════════════════════════════════════════
 class T09_PlannerEndToEnd(unittest.TestCase):
     """
-    Full pipeline smoke test — PlannerAgent.run() with all external calls
+    Full pipeline smoke test — PrecomputePipeline.run() with all external calls
     mocked.  Validates that IncidentReport is returned with expected Phase 0-3
     fields populated.
     """
@@ -799,7 +799,7 @@ class T09_PlannerEndToEnd(unittest.TestCase):
         from agents import (
             IngestionAgent, KnowledgeAgent, AnalysisAgent,
             RiskAgent, CounterMessageAgent, CriticAgent,
-            ReportAgent, VisualAgent, PlannerAgent,
+            ReportAgent, VisualAgent, PrecomputePipeline,
         )
         from agents.community import CommunityAgent
 
@@ -831,7 +831,7 @@ class T09_PlannerEndToEnd(unittest.TestCase):
         visual      = VisualAgent(sd=sd, kuzu=kuzu)
         community   = CommunityAgent(kuzu=kuzu)
 
-        return PlannerAgent(
+        return PrecomputePipeline(
             ingestion=ingestion, knowledge=knowledge,
             analysis=analysis, risk=risk,
             counter_msg=counter_msg, critic=critic,
@@ -944,7 +944,7 @@ class T09_PlannerEndToEnd(unittest.TestCase):
 
     def test_full_pipeline_trend_analysis(self):
         """
-        PlannerAgent.run() with TREND_ANALYSIS intent.
+        PrecomputePipeline.run() with TREND_ANALYSIS intent.
         Validates report structure and Phase 0/1/2/3 fields.
         """
         planner = self._build_planner_with_mocks()

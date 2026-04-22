@@ -47,7 +47,7 @@ from agents import (
     CriticAgent,
     IngestionAgent,
     KnowledgeAgent,
-    PlannerAgent,
+    PrecomputePipeline,
     ReportAgent,
     RiskAgent,
     VisualAgent,
@@ -117,8 +117,8 @@ def load_claim_fixture(path: Path) -> tuple[list[Post], dict]:
     return posts, metadata
 
 
-def build_planner() -> PlannerAgent:
-    """Instantiate all services and agents; return a wired-up PlannerAgent."""
+def build_precompute_pipeline() -> PrecomputePipeline:
+    """Instantiate all services and agents; return a wired-up PrecomputePipeline."""
     log.info("system.startup")
 
     # Services
@@ -160,7 +160,7 @@ def build_planner() -> PlannerAgent:
 
     community = CommunityAgent(kuzu=kuzu)
 
-    return PlannerAgent(
+    return PrecomputePipeline(
         ingestion=ingestion,
         knowledge=knowledge,
         analysis=analysis,
@@ -400,7 +400,7 @@ def main() -> int:
             "or --claims-from."
         )
 
-    planner = build_planner()
+    planner = build_precompute_pipeline()
 
     # ── P0-0: fixed claim set fixture (§10.6) ────────────────────────────────
     fixture_posts: list[Post] | None = None

@@ -1,14 +1,18 @@
-"""Chat Orchestrator — the single entry point for `POST /chat/query`.
+"""Chat Orchestrator — single entry point for `POST /chat/query`.
 
-Pipeline (per interactive_agent_transformation_plan_skills_mcp.md §7.3):
+Pipeline (per `complete_project_transformation_plan.md` §4.2-4.4):
 
     load session state
-      → router.classify(message, session_context)
-      → capability = CAPABILITY_REGISTRY[intent]
-      → capability.run(input)
-      → answer_composer.compose(...)
+      → router.classify(message, session_context)     # intent + targets
+      → planner.plan(route)                           # pick workflow template
+      → planner.execute(template, route, state)       # run bounded DAG
+      → answer_composer.compose(...)                  # natural-language answer
       → append turns to session state
       → return ChatResponse
+
+The Orchestrator itself contains **zero** business logic — it only wires
+Router → Planner → Composer and maintains session state. Capabilities stay
+unaware of conversation history; Tools stay unaware of sessions entirely.
 """
 
 from __future__ import annotations
@@ -16,15 +20,8 @@ from __future__ import annotations
 import uuid
 from typing import Any, Optional
 
-from pydantic import BaseModel
-
-# Import capabilities package to populate CAPABILITY_REGISTRY.
-import capabilities  # noqa: F401 — side-effect: registers capabilities
-from capabilities import CAPABILITY_REGISTRY
-from capabilities.base import CapabilityError
-
-# Ensure concrete capabilities are imported too (registration happens on
-# module import).
+# Ensure capability modules register themselves.
+import capabilities  # noqa: F401
 import capabilities.topic_overview_capability  # noqa: F401
 import capabilities.emotion_insight_capability  # noqa: F401
 import capabilities.claim_status_capability  # noqa: F401
@@ -33,6 +30,7 @@ import capabilities.visual_summary_capability  # noqa: F401
 import capabilities.run_compare_capability  # noqa: F401
 import capabilities.explain_decision_capability  # noqa: F401
 
+from agents.planner import PlannerAgent, PlanExecution
 from agents.router import IntentRouter, RouterOutput
 from models.chat import ChatResponse
 from models.session import SessionState
@@ -44,9 +42,11 @@ class ChatOrchestrator:
     def __init__(
         self,
         router: Optional[IntentRouter] = None,
+        planner: Optional[PlannerAgent] = None,
         composer: Optional[AnswerComposer] = None,
     ) -> None:
         self._router = router or IntentRouter()
+        self._planner = planner or PlannerAgent()
         self._composer = composer or AnswerComposer()
 
     # ── Public entry point ────────────────────────────────────────────────
@@ -58,18 +58,23 @@ class ChatOrchestrator:
         session_store.append_turn(state, role="user", content=message)
 
         route = self._router.classify(message, session_context)
-        capability_output, cap_name, visuals = self._dispatch(route, state)
+        intent = _resolve_intent(route, state)
+        route = route.model_copy(update={"intent": intent})
+
+        execution = self._planner.plan_and_execute(route, state)
+
+        capability_name, capability_output, visuals = _unpack(execution)
 
         answer_text = self._composer.compose(
             user_message=message,
-            capability_name=cap_name,
+            capability_name=capability_name,
             capability_output=capability_output,
             session_context=session_context,
         )
 
         session_store.append_turn(
             state, role="assistant", content=answer_text,
-            capability_used=cap_name,
+            capability_used=capability_name,
         )
         self._update_session_targets(state, route, capability_output)
         session_store.save(state)
@@ -77,40 +82,12 @@ class ChatOrchestrator:
         return ChatResponse(
             session_id=state.session_id,
             answer_text=answer_text,
-            capability_used=cap_name,
+            capability_used=capability_name,
             capability_output=capability_output,
             visual_paths=visuals,
         )
 
     # ── Internals ─────────────────────────────────────────────────────────
-
-    def _dispatch(
-        self, route: RouterOutput, state: SessionState,
-    ) -> tuple[Optional[dict[str, Any]], Optional[str], list[str]]:
-        intent = route.intent
-        if intent == "followup":
-            intent = _resolve_followup(state)
-
-        if intent == "other" or intent not in CAPABILITY_REGISTRY:
-            return None, None, []
-
-        capability = CAPABILITY_REGISTRY[intent]
-        try:
-            payload = _build_capability_input(capability, route, state)
-            output = capability.run(payload)
-            return (
-                output.model_dump(mode="json"),
-                capability.name,
-                _extract_visuals(output),
-            )
-        except CapabilityError as exc:
-            return {"error": str(exc)}, capability.name, []
-        except Exception as exc:
-            return (
-                {"error": f"{type(exc).__name__}: {exc}"},
-                capability.name,
-                [],
-            )
 
     @staticmethod
     def _update_session_targets(
@@ -145,48 +122,57 @@ def _session_context(state: SessionState) -> dict[str, Any]:
     }
 
 
-def _resolve_followup(state: SessionState) -> str:
-    """For followup intent, inherit the most recent capability."""
-    for t in reversed(state.conversation):
-        if t.capability_used:
-            return t.capability_used
+def _resolve_intent(route: RouterOutput, state: SessionState) -> str:
+    """Followup intent inherits the most recent capability from session."""
+    if route.intent != "followup":
+        return route.intent
+    for turn in reversed(state.conversation):
+        if turn.capability_used:
+            return turn.capability_used
     return "other"
 
 
-def _build_capability_input(
-    capability, route: RouterOutput, state: SessionState
-) -> BaseModel:
-    """Construct Input model for a capability using router targets + session."""
-    cls = capability.Input
-    fields = set(cls.model_fields.keys())
+def _unpack(
+    execution: Optional[PlanExecution],
+) -> tuple[Optional[str], Optional[dict[str, Any]], list[str]]:
+    """Return (capability_name, capability_output, visuals) from execution.
 
-    run_id = route.targets.run_id or state.current_run_id or "latest"
-    topic_id = route.targets.topic_id or state.current_topic_id
-    claim_id = route.targets.claim_id or state.current_claim_id
+    Shape chosen so the Composer and the HTTP response stay stable whether
+    the planner ran a 1-step or multi-step workflow. The primary step drives
+    the user-facing answer; secondary steps get attached under
+    `aux_outputs` so the UI can still render side panels (graph, etc.).
+    """
+    if execution is None:
+        return None, None, []
 
-    payload: dict[str, Any] = {}
-    if "run_id" in fields:
-        payload["run_id"] = run_id
-    if "topic_id" in fields and topic_id is not None:
-        payload["topic_id"] = topic_id
-    if "claim_id" in fields and claim_id is not None:
-        payload["claim_id"] = claim_id
-    # run_compare: baseline_run_id is always inferred (capability picks prev).
-    if "baseline_run_id" in fields:
-        payload["baseline_run_id"] = None
-    return cls(**payload)
+    primary = execution.primary_output
+    if primary is None:
+        # All steps failed. Surface the first error.
+        first_err = next(
+            (s.error for s in execution.steps if s.error), "no_capability_match"
+        )
+        return (
+            execution.primary_capability,
+            {"error": first_err, "workflow": execution.workflow_name},
+            execution.visual_paths,
+        )
 
+    # Merge secondary steps so the frontend can access them without
+    # re-running the workflow.
+    aux: dict[str, Any] = {}
+    for step in execution.steps:
+        if step.alias == execution.primary_capability:
+            continue
+        if step.output is not None:
+            aux[step.alias] = step.output
 
-def _extract_visuals(output: BaseModel) -> list[str]:
-    """Best-effort visual path extraction from capability output."""
-    data = output.model_dump(mode="json")
-    paths: list[str] = []
-    for key in (
-        "image_path", "visual_path", "visual_card_path", "counter_visuals",
-    ):
-        v = data.get(key)
-        if isinstance(v, str):
-            paths.append(v)
-        elif isinstance(v, list):
-            paths.extend(p for p in v if isinstance(p, str))
-    return paths
+    enriched = dict(primary)
+    if aux:
+        enriched["aux_outputs"] = aux
+    enriched["workflow"] = execution.workflow_name
+
+    return (
+        execution.primary_capability,
+        enriched,
+        execution.visual_paths,
+    )

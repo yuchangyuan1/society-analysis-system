@@ -9,7 +9,7 @@ Persistence: SQLite (Python built-in).  The DB file is created automatically
 at data/counter_effects.db relative to the project working directory.
 
 Workflow:
-  1. When PlannerAgent deploys a counter-message, call record_deployment().
+  1. When PrecomputePipeline deploys a counter-message, call record_deployment().
   2. On the next TREND_ANALYSIS run for the same topic, call record_followup().
   3. compute_effect_score() derives velocity_delta, decay_rate, effect_score, outcome.
   4. get_effect_report() aggregates all records into a CounterEffectReport.
@@ -250,7 +250,7 @@ class CounterEffectService:
     ) -> list[CounterEffectRecord]:
         """
         P0-4 closed-loop helper: return PENDING records that match any of the
-        given topic_ids / topic_labels / claim_ids. Used by PlannerAgent at the
+        given topic_ids / topic_labels / claim_ids. Used by PrecomputePipeline at the
         start of each run to follow up on prior deployments whose topic or
         claim reappears in the current data.
         """

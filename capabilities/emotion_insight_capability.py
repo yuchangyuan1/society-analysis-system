@@ -77,6 +77,19 @@ def _interpret(distribution: dict[str, float], dominant: str) -> str:
 
 class EmotionInsightCapability(Capability):
     name = "emotion_analysis"
+    description = (
+        "Summarize the emotional profile of a topic or an entire run: "
+        "dominant emotion, emotion distribution (anger / fear / joy / etc.), "
+        "and an interpretation. Answers 'how's the mood', "
+        "'which topics are angriest', or 'emotion distribution'."
+    )
+    example_utterances = [
+        "这个话题的情绪怎么样",
+        "how angry is the discussion",
+        "what's the emotional profile of topic X",
+        "情绪分布",
+    ]
+    tags = ["emotion", "sentiment"]
     Input = EmotionInsightInput
     Output = EmotionInsightOutput
 

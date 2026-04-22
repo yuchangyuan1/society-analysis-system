@@ -46,6 +46,21 @@ class PropagationInsightOutput(CapabilityOutput):
 
 class PropagationInsightCapability(Capability):
     name = "propagation_analysis"
+    description = (
+        "Explain how a topic is spreading: bridge accounts, communities, "
+        "coordination signals, velocity, anomalies. Backed by Kuzu graph "
+        "queries (not by the NetworkX JSON rebuild). Answers 'who is "
+        "spreading X', 'is this coordinated', 'which communities are "
+        "involved', 'bridge accounts'."
+    )
+    example_utterances = [
+        "这个话题是谁在带的",
+        "谁在传播 X",
+        "is this coordinated spreading",
+        "bridge accounts for topic X",
+        "怎么扩散的",
+    ]
+    tags = ["propagation", "graph", "community", "bridge"]
     Input = PropagationInsightInput
     Output = PropagationInsightOutput
 

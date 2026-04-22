@@ -6,7 +6,7 @@ Corresponds to:
   Task 3.3  — Continuous watch mode
 
 Design:
-  Polling-based monitor that re-runs the PlannerAgent pipeline at configurable
+  Polling-based monitor that re-runs the PrecomputePipeline pipeline at configurable
   intervals.  A lightweight event loop checks for new or accelerating topics
   and emits alerts when thresholds are crossed.
 
@@ -73,7 +73,7 @@ class MonitorService:
 
     Parameters
     ----------
-    planner : PlannerAgent
+    planner : PrecomputePipeline
         The fully wired planner to re-invoke each cycle.
     config : MonitorConfig
         Thresholds and behaviour flags.
@@ -83,7 +83,7 @@ class MonitorService:
 
     def __init__(
         self,
-        planner,   # PlannerAgent — avoid circular import
+        planner,   # PrecomputePipeline — avoid circular import
         config: Optional[MonitorConfig] = None,
         on_alert: Optional[Callable[[MonitorAlert], None]] = None,
     ) -> None:
@@ -109,7 +109,7 @@ class MonitorService:
         Parameters
         ----------
         query : str
-            The search / topic query forwarded to PlannerAgent.
+            The search / topic query forwarded to PrecomputePipeline.
         interval_seconds : int
             Seconds to wait between polling cycles.
         intent_type : str

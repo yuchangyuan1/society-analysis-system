@@ -38,6 +38,19 @@ class ExplainDecisionOutput(CapabilityOutput):
 
 class ExplainDecisionCapability(Capability):
     name = "explain_decision"
+    description = (
+        "Explain the intervention decision for a run or topic: which action "
+        "(rebut / clarify / abstain) was taken, why, any skip reasons, and "
+        "historical counter-effect scores. Answers 'why did we intervene', "
+        "'why no counter-message', 'explain the decision'."
+    )
+    example_utterances = [
+        "为什么干预这个话题",
+        "why didn't we post a counter message",
+        "explain the decision",
+        "为什么没出反驳卡",
+    ]
+    tags = ["decision", "intervention", "explain"]
     Input = ExplainDecisionInput
     Output = ExplainDecisionOutput
 

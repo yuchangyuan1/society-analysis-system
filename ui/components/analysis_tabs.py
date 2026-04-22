@@ -38,7 +38,13 @@ def reset_panels() -> None:
 def route_capability_to_panels(
     capability_name: Optional[str], output: dict[str, Any]
 ) -> None:
-    """Store capability output under the panel(s) it feeds."""
+    """Store capability output under the panel(s) it feeds.
+
+    The planner-DAG path may attach secondary step outputs under
+    `output["aux_outputs"]` (see agents/planner.py). We route those too so a
+    `claim_verification_flow` can populate both the Evidence tab (primary)
+    and the Graph tab (from its `propagation_context` step).
+    """
     if not output or "error" in output:
         return
 
@@ -61,6 +67,28 @@ def route_capability_to_panels(
         st.session_state["panel_topic"] = {"source": name, "data": output}
         if output.get("visual_card_path"):
             st.session_state["panel_visual"] = {"source": name, "data": output}
+
+    # Fan-out aux DAG step outputs to whichever panel each one feeds.
+    aux = output.get("aux_outputs") or {}
+    for alias, sub in aux.items():
+        if not isinstance(sub, dict):
+            continue
+        if alias == "propagation_analysis" or alias == "propagation_context":
+            st.session_state["panel_graph"] = {
+                "source": "propagation_analysis", "data": sub,
+            }
+        elif alias == "visual_summary":
+            st.session_state["panel_visual"] = {
+                "source": "visual_summary", "data": sub,
+            }
+        elif alias == "run_compare":
+            st.session_state["panel_metrics"] = {
+                "source": "run_compare", "data": sub,
+            }
+        elif alias == "emotion_analysis" and "panel_topic" not in st.session_state:
+            st.session_state["panel_topic"] = {
+                "source": "emotion_analysis", "data": sub,
+            }
 
 
 def render() -> None:
@@ -100,6 +128,10 @@ def _render_evidence(entry: Optional[dict[str, Any]]) -> None:
     st.markdown(f"**Claim:** _{data.get('claim_text','')}_")
     verdict = data.get("verdict_label", "?")
     st.markdown(f"**Verdict:** {_VERDICT_BADGE.get(verdict, verdict)}")
+
+    rationale = data.get("verdict_rationale")
+    if rationale:
+        st.caption(rationale)
 
     st.dataframe(
         [

@@ -1,0 +1,39 @@
+# scripts/scheduler_tasks.yaml — periodic precompute task definitions.
+#
+# Copy to scripts/scheduler_tasks.yaml and edit. Each task runs the full
+# precompute pipeline (agents/precompute_pipeline.py) against one source.
+#
+# Trigger options (pick one):
+#   cron: "0 */6 * * *"         # APScheduler cron expression
+#   interval_seconds: 21600      # or a simple interval
+#
+# If neither is set the task is registered but never fires on its own — use
+# `python scripts/scheduler.py --mode once --task NAME` to invoke manually
+# (e.g. from OS cron / Windows Task Scheduler / GitHub Actions cron).
+
+tasks:
+  # Fixture smoke test — cheap, hermetic, no network. Good for verifying the
+  # scheduler wiring before pointing it at live sources.
+  - name: fixture_smoke
+    interval_seconds: 86400
+    claims_from: tests/fixtures/claims_conspiracy_baseline.json
+
+  # Pull a Telegram channel every 6 hours.
+  # - name: tg_healthranger
+  #   cron: "0 */6 * * *"
+  #   channel: RealHealthRanger
+  #   days_back: 1
+
+  # Pull r/conspiracy every 4 hours.
+  # - name: reddit_conspiracy
+  #   cron: "0 */4 * * *"
+  #   subreddit: conspiracy
+  #   reddit_sort: hot
+  #   days_back: 1
+
+  # Free-text Reddit search nightly.
+  # - name: reddit_health_nightly
+  #   cron: "30 3 * * *"
+  #   reddit_query: "vaccine misinformation"
+  #   reddit_sort: new
+  #   days_back: 1

@@ -16,17 +16,45 @@ def render_capability_output(
     capability_name: Optional[str],
     output: dict[str, Any],
 ) -> None:
-    """Dispatch to per-capability renderer; fall back to raw JSON."""
+    """Dispatch to per-capability renderer; fall back to raw JSON.
+
+    Also surfaces planner-DAG context: the `workflow` name and any secondary
+    step outputs under `aux_outputs` (e.g. a claim_verification flow that
+    tacked on a propagation_analysis step). See `agents/planner.py`.
+    """
     if "error" in output:
         st.warning(f"Capability error: {output['error']}")
+        wf = output.get("workflow")
+        if wf:
+            st.caption(f"_workflow: `{wf}`_")
         return
 
+    # 1. Workflow banner (only when the planner actually ran a template).
+    wf = output.get("workflow")
+    aux = output.get("aux_outputs") or {}
+    if wf:
+        steps = [capability_name] + [k for k in aux.keys()]
+        steps_str = " → ".join(s for s in steps if s)
+        st.caption(f"_workflow: `{wf}` · steps: {steps_str}_")
+
+    # 2. Primary capability renderer.
     renderer = _RENDERERS.get(capability_name or "")
     if renderer is None:
         with st.expander("Raw capability output"):
             st.json(output)
-        return
-    renderer(output)
+    else:
+        renderer(output)
+
+    # 3. Aux step outputs (secondary DAG steps).
+    if aux:
+        with st.expander(f"Other DAG steps ({len(aux)})", expanded=False):
+            for alias, sub_out in aux.items():
+                st.markdown(f"**{alias}**")
+                sub_renderer = _RENDERERS.get(alias)
+                if sub_renderer is not None and isinstance(sub_out, dict):
+                    sub_renderer(sub_out)
+                else:
+                    st.json(sub_out)
 
 
 # ─── Per-capability renderers ────────────────────────────────────────────────
@@ -93,12 +121,23 @@ def _render_claim_status(output: dict[str, Any]) -> None:
     st.markdown(f"**Verdict:** {badge}")
     st.markdown(f"**Claim:** _{output.get('claim_text','')}_")
 
+    rationale = output.get("verdict_rationale")
+    if rationale:
+        st.info(rationale)
+
     counts = [
         {"stance": "supporting", "count": output.get("supporting_count", 0)},
         {"stance": "contradicting", "count": output.get("contradicting_count", 0)},
         {"stance": "uncertain", "count": output.get("uncertain_count", 0)},
     ]
     st.dataframe(counts, use_container_width=True, hide_index=True)
+
+    tiers = output.get("evidence_tiers") or {}
+    if tiers:
+        st.caption(
+            "Evidence tier histogram: "
+            + ", ".join(f"`{k}`={v}" for k, v in sorted(tiers.items()))
+        )
 
     for key, label in [
         ("top_supporting", "Top supporting evidence"),
@@ -116,6 +155,20 @@ def _render_claim_status(output: dict[str, Any]) -> None:
                 hdr = f"- [{title}]({url})" if url else f"- {title}"
                 st.markdown(f"{hdr}  _{src} · {tier}_")
                 snip = ev.get("snippet")
+                if snip:
+                    st.caption(snip)
+
+    retrieved = output.get("retrieved_chunks") or []
+    if retrieved:
+        with st.expander(f"On-demand Chroma retrieval ({len(retrieved)})"):
+            for c in retrieved:
+                title = c.get("title") or c.get("article_id", "?")
+                url = c.get("url") or ""
+                sim = c.get("similarity", 0.0)
+                src = c.get("source_name") or ""
+                hdr = f"- [{title}]({url})" if url else f"- {title}"
+                st.markdown(f"{hdr}  _sim={sim:.3f} · {src}_")
+                snip = c.get("snippet")
                 if snip:
                     st.caption(snip)
 

@@ -199,9 +199,14 @@ class T2_GraphTools(unittest.TestCase):
         _build_run_dir(self._runs, "20260421-010000-aaaaaa")
         import tools.run_query_tools as m
         import tools.graph_tools as gt
+        # Force the JSON fallback path: this test class writes a synthetic
+        # report_raw.json fixture but never seeds Kuzu. In production the two
+        # backends are coherent because both are populated by the same
+        # pipeline run.
         self._patches = [
             patch.object(m, "_DATA_ROOT", self._runs),
             patch.object(m, "_SAMPLE_ROOT", self._samples),
+            patch.object(gt, "_kuzu_or_none", lambda: None),
         ]
         for p in self._patches:
             p.start()
@@ -319,9 +324,14 @@ class T4_ClaimStatusCapability(unittest.TestCase):
         _build_run_dir(self._runs, "20260421-010000-aaaaaa")
         import tools.run_query_tools as m
         import tools.graph_tools as gt
+        # Force the JSON fallback path: this test class writes a synthetic
+        # report_raw.json fixture but never seeds Kuzu. In production the two
+        # backends are coherent because both are populated by the same
+        # pipeline run.
         self._patches = [
             patch.object(m, "_DATA_ROOT", self._runs),
             patch.object(m, "_SAMPLE_ROOT", self._samples),
+            patch.object(gt, "_kuzu_or_none", lambda: None),
         ]
         for p in self._patches:
             p.start()
@@ -372,9 +382,14 @@ class T5_PropagationCapability(unittest.TestCase):
         _build_run_dir(self._runs, "20260421-010000-aaaaaa")
         import tools.run_query_tools as m
         import tools.graph_tools as gt
+        # Force the JSON fallback path: this test class writes a synthetic
+        # report_raw.json fixture but never seeds Kuzu. In production the two
+        # backends are coherent because both are populated by the same
+        # pipeline run.
         self._patches = [
             patch.object(m, "_DATA_ROOT", self._runs),
             patch.object(m, "_SAMPLE_ROOT", self._samples),
+            patch.object(gt, "_kuzu_or_none", lambda: None),
         ]
         for p in self._patches:
             p.start()

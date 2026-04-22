@@ -118,6 +118,19 @@ def _pick_baseline(target_run_id: str) -> str:
 
 class RunCompareCapability(Capability):
     name = "run_compare"
+    description = (
+        "Compare two runs (typically the latest vs the previous) on "
+        "post_count / unique_accounts / velocity / misinfo_risk / counter "
+        "messages. Emit a list of deltas + narrative. Answers 'how did "
+        "things change', 'compare to yesterday', 'what's different this run'."
+    )
+    example_utterances = [
+        "这次和上次比变化大吗",
+        "compare to last run",
+        "和昨天比怎么样",
+        "what's different from the previous run",
+    ]
+    tags = ["compare", "delta", "metrics"]
     Input = RunCompareInput
     Output = RunCompareOutput
 

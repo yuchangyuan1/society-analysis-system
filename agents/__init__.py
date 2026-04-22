@@ -6,7 +6,8 @@ from .counter_message import CounterMessageAgent
 from .critic import CriticAgent
 from .report import ReportAgent
 from .visual import VisualAgent
-from .planner import PlannerAgent, IntentType
+from .precompute_pipeline import PrecomputePipeline, IntentType
+from .planner import PlannerAgent, WorkflowTemplate, PlanExecution
 
 __all__ = [
     "IngestionAgent",
@@ -17,6 +18,9 @@ __all__ = [
     "CriticAgent",
     "ReportAgent",
     "VisualAgent",
-    "PlannerAgent",
+    "PrecomputePipeline",
     "IntentType",
+    "PlannerAgent",
+    "WorkflowTemplate",
+    "PlanExecution",
 ]

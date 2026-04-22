@@ -45,4 +45,6 @@ dependencies = [
     "plotly>=5.20.0",
     "pyvis>=0.3.2",
     "requests>=2.31.0",
+    # Scheduler (see scripts/scheduler.py). Optional at runtime — imported lazily.
+    "apscheduler>=3.10.0",
 ]

@@ -1,0 +1,60 @@
+# ───────────────────────────────────────────────────────────────────────────
+# Scheduler tasks - redesign-2026-05.
+#
+# Each task drives one v2 backend job. The runner (`scripts/scheduler.py`)
+# executes each task once at startup (`run_on_start: true`) and then on the
+# given cron expression. This keeps "first deploy works without manual
+# intervention" + "daily refresh" in a single config file.
+#
+# Cron syntax: APScheduler / standard 5-field "minute hour dom month dow".
+# All times are local to the machine running the scheduler.
+# ───────────────────────────────────────────────────────────────────────────
+
+defaults:
+  run_on_start: true
+  enabled: true
+
+tasks:
+
+  # ── 1. Authoritative-source ingestion ────────────────────────────────────
+  # Pulls BBC / NYT / Reuters / AP / Xinhua and embeds chunks into Chroma 1.
+  - name: official_sources
+    kind: official_ingestion
+    cron: "15 1 * * *"           # 01:15 daily
+    args:
+      source_filter: null         # null = all enabled sources
+      write_chroma: true
+
+  # ── 2. Reddit community ingestion ────────────────────────────────────────
+  # Runs the v2 PrecomputePipelineV2: fetch -> ingest -> normalize ->
+  # emotion -> topic_cluster -> schema_propose -> persist_v2.
+  - name: reddit_default
+    kind: precompute_v2
+    cron: "30 2 * * *"           # 02:30 daily
+    args:
+      subreddits:
+        - conspiracy
+        - worldnews
+        - politics
+      reddit_days_back: 1
+
+  # ── 3. Reflection auto-curate ────────────────────────────────────────────
+  # Decay scanner: drops stale exemplars / errors from Chroma 2 + Chroma 3.
+  # Anchor docs (kind=schema, kind=module_card) are preserved.
+  - name: experience_decay
+    kind: decay_experience
+    cron: "0 4 * * *"            # 04:00 daily
+    args:
+      ttl_days: 30
+      min_confidence: 0.2
+      dry_run: false
+
+  # ── 4. (OPTIONAL) Telegram channel ingestion ─────────────────────────────
+  # Disabled by default. Enable + fill TELEGRAM_API_ID/HASH to use.
+  # - name: telegram_health_ranger
+  #   kind: precompute_v2
+  #   cron: "45 3 * * *"
+  #   enabled: false
+  #   args:
+  #     channel: RealHealthRanger
+  #     channel_days_back: 1

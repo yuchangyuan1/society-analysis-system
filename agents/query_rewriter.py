@@ -147,7 +147,7 @@ class QueryRewriter:
     def _session_context(session: Optional[SessionState]) -> dict:
         if session is None:
             return {}
-        return {
+        ctx: dict = {
             "current_run_id": session.current_run_id,
             "current_topic_id": session.current_topic_id,
             "current_claim_id": session.current_claim_id,
@@ -158,6 +158,13 @@ class QueryRewriter:
                 if t.role == "assistant"
             ],
         }
+        # Phase 6 (B): if older turns were compressed into a rolling
+        # summary, surface it so the Rewriter can resolve pronouns or
+        # earlier topic anchors that fall outside the live window.
+        if session.summary:
+            ctx["older_context_summary"] = session.summary
+            ctx["archived_turns"] = session.archived_count
+        return ctx
 
     def _call_llm(self, message: str, ctx: dict) -> dict:
         user_msg = (

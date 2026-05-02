@@ -15,6 +15,11 @@ the request out to **three retrieval branches in parallel** —
 guarding against hallucination, and feeds Critic verdicts back into a
 Reflection store that auto-curates the system's own learned exemplars.
 
+Long-running chat sessions stay performant: the conversation list is
+window-bounded and older turns are auto-compressed into a rolling
+summary, so a session can run for hundreds of turns without ballooning
+memory or prompt size.
+
 > Want the design rationale? See `PROJECT_REDESIGN_V2.md`.
 > Want the code map? See `workflow.md`.
 
@@ -184,6 +189,37 @@ curl 'http://127.0.0.1:8000/reflection/log?limit=20'
 
 ---
 
+## Long-running sessions
+
+Each chat session is stored as a single JSON file under `data/sessions/`.
+The conversation list is automatically window-bounded so it stays small
+and fast to load:
+
+- Up to `SESSION_MAX_TURNS` (default **40**) turns kept verbatim.
+- When that limit is exceeded, the oldest `SESSION_MIN_TURNS_TO_COMPACT`
+  (default **10**) turns are compressed into a rolling `summary` field
+  via one LLM call (`agents/conversation_compactor.py`).
+- The Rewriter sees both the live window AND the rolling summary, so
+  pronouns and topic anchors set hundreds of turns ago still resolve.
+- LLM failures fall back to a plain trim, so persistence never breaks.
+
+What you'll see in `data/sessions/<id>.json`:
+
+```json
+{
+  "session_id": "demo",
+  "current_topic_id": "topic_abc",
+  "summary": "User asked about vaccine misinformation, ...",
+  "summary_until_turn": 30,
+  "archived_count": 30,
+  "conversation": [/* most recent 40 turns */]
+}
+```
+
+Override the window via env vars (see config table).
+
+---
+
 ## Routine maintenance
 
 ```bash
@@ -232,6 +268,9 @@ common ones:
 | `EXPERIENCE_MIN_CONFIDENCE` | 0.2 | Auto-decay confidence floor |
 | `MULTIMODAL_DAILY_BUDGET_USD` | 5.0 | Daily image-understanding spend cap |
 | `MULTIMODAL_MIN_LIKES / MIN_REPLIES` | 50 / 20 | Sample threshold for image processing |
+| `SESSION_MAX_TURNS` | 40 | Per-session conversation window |
+| `SESSION_MIN_TURNS_TO_COMPACT` | 10 | Minimum batch size when the compactor runs |
+| `SESSION_SUMMARY_MAX_CHARS` | 1200 | Cap on the rolling summary length |
 
 ---
 

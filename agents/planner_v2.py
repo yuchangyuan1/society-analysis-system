@@ -26,6 +26,7 @@ back-propagate signal into Chroma 3.
 """
 from __future__ import annotations
 
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -278,10 +279,22 @@ class BoundedPlannerV2:
             # may stash them in metadata_filter or in the subtask text.
             if sub.intent == "propagation_trace":
                 meta = sub.targets.metadata_filter or {}
-                if meta.get("source_account"):
-                    payload["source_account"] = meta["source_account"]
-                if meta.get("target_account"):
-                    payload["target_account"] = meta["target_account"]
+                src = meta.get("source_account")
+                dst = meta.get("target_account")
+                # Fallback: scan the subtask text for `u_*` style account
+                # ids (and a few common shapes like @handle / "user_x") so
+                # we don't return "missing source/target" just because the
+                # Rewriter forgot to populate metadata_filter.
+                if not (src and dst):
+                    candidates = _extract_account_ids(sub.text)
+                    if not src and candidates:
+                        src = candidates[0]
+                    if not dst and len(candidates) >= 2:
+                        dst = candidates[1]
+                if src:
+                    payload["source_account"] = src
+                if dst:
+                    payload["target_account"] = dst
             return payload
         return {}
 
@@ -494,6 +507,71 @@ def default_kg_runner(inv: BranchInvocation) -> KGOutput:
         return _KGOut(query_kind="influencer_rank",
                        target={"reason": "no topic anchor available"})
     return analytics.influencer_rank(topic_id=topic_id, top_k=10)
+
+
+_ACCOUNT_ID_RE = re.compile(
+    r"\b(?:u_|user_|@)?([a-zA-Z][a-zA-Z0-9_]{1,30})\b"
+)
+
+
+def _extract_account_ids(text: str) -> list[str]:
+    """Best-effort scan of natural-language text for account ids.
+
+    Looks for tokens shaped like `u_alice`, `@bob`, `user_carol`. Falls
+    back to confirming each candidate against the live PG `posts_v2`
+    table so we don't pick up generic English nouns. The check is cached
+    cheap (single SELECT WHERE author IN (...)).
+    """
+    if not text:
+        return []
+    # Stage 1: token shapes that strongly imply an account id
+    direct: list[str] = []
+    for m in re.finditer(r"\b(u_[a-zA-Z][a-zA-Z0-9_]*|user_[a-zA-Z][a-zA-Z0-9_]*|@[a-zA-Z][a-zA-Z0-9_]*)\b", text):
+        tok = m.group(1)
+        if tok.startswith("@"):
+            tok = tok[1:]
+        direct.append(tok)
+    if len(direct) >= 2:
+        return direct[:5]
+
+    # Stage 2: ask Postgres which words appear as authors. This catches
+    # plain handles like "alice" without prefix.
+    try:
+        from services.postgres_service import PostgresService
+        pg = PostgresService()
+        pg.connect()
+    except Exception:
+        return direct
+    candidates = re.findall(r"\b[a-zA-Z][a-zA-Z0-9_]{1,30}\b", text)
+    candidates = [c for c in candidates if len(c) >= 2]
+    if not candidates:
+        return direct
+    try:
+        with pg.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT account_id, author "
+                "FROM posts_v2 "
+                "WHERE LOWER(account_id) = ANY(%s) "
+                "   OR LOWER(author) = ANY(%s)",
+                ([c.lower() for c in candidates],
+                 [c.lower() for c in candidates]),
+            )
+            rows = cur.fetchall() or []
+    except Exception:
+        return direct
+    seen: set[str] = set(direct)
+    out: list[str] = list(direct)
+    # Preserve mention order from the text
+    lower_to_account = {}
+    for r in rows:
+        lower_to_account[(r["author"] or "").lower()] = r["account_id"]
+        lower_to_account[(r["account_id"] or "").lower()] = r["account_id"]
+    for c in candidates:
+        match = lower_to_account.get(c.lower())
+        if match and match not in seen:
+            seen.add(match)
+            out.append(match)
+    return out[:5]
 
 
 def _resolve_default_topic_id() -> str | None:

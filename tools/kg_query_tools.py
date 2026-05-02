@@ -34,6 +34,37 @@ from services.kuzu_service import KuzuService
 log = structlog.get_logger(__name__)
 
 
+def _fetch_post_meta(post_ids: set[str]) -> dict[str, dict]:
+    """Hydrate a set of Post ids with their text + author from Postgres.
+
+    Best-effort: returns an empty dict if PG is unreachable. Used by
+    propagation_path / cascade_tree / viral_cascade to expose
+    human-readable content alongside raw graph ids.
+    """
+    if not post_ids:
+        return {}
+    try:
+        from services.postgres_service import PostgresService
+        pg = PostgresService()
+        pg.connect()
+        with pg.cursor() as cur:
+            cur.execute(
+                "SELECT post_id, author, text FROM posts_v2 "
+                "WHERE post_id = ANY(%s)",
+                (list(post_ids),),
+            )
+            rows = list(cur.fetchall())
+    except Exception:
+        return {}
+    return {
+        r["post_id"]: {
+            "author": r.get("author") or "",
+            "text": r.get("text") or "",
+        }
+        for r in rows
+    }
+
+
 @dataclass
 class KGQueryTool:
     kuzu: Optional[KuzuService] = None
@@ -71,29 +102,61 @@ class KGQueryTool:
             out.elapsed_ms = int((time.monotonic() - t0) * 1000)
             return out
 
-        # Match a chain of reply edges between any post by source and any
-        # post by target, in either direction. Return the post ids in the
-        # path so we can reconstruct nodes.
-        cypher = (
-            "MATCH (a:Account {id: $aid})-[:Posted]->(pa:Post), "
-            "      (b:Account {id: $bid})-[:Posted]->(pb:Post), "
-            "      path = (pa)-[:Replied*1.." + str(max_hops) + "]-(pb) "
-            "RETURN [n IN nodes(path) | n.id] AS post_ids "
-            "LIMIT 5"
-        )
-        rows = self.kuzu._safe_execute(  # type: ignore[attr-defined]
-            cypher, {"aid": source_account, "bid": target_account},
-        ) or []
+        # Reply edges are directed child -> parent in our schema.
+        # We try both directions: target replied (transitively) to source,
+        # then source replied to target. Kuzu 0.7 doesn't support
+        # `[n IN nodes(p) | ...]` comprehensions, so we project nodes()
+        # raw and unpack node ids in Python.
+        # Two passes (directed each way) merged in Python to keep the
+        # Cypher simple and Kuzu-compatible.
+        results = []
+        for src_pid_node, dst_pid_node in [("pa", "pb"), ("pb", "pa")]:
+            cypher = (
+                "MATCH (a:Account {id: $aid})-[:Posted]->(pa:Post), "
+                "      (b:Account {id: $bid})-[:Posted]->(pb:Post), "
+                f"      path = ({src_pid_node})-[:Replied*1..{max_hops}]"
+                f"->({dst_pid_node}) "
+                "RETURN nodes(path) AS chain LIMIT 5"
+            )
+            rows = self.kuzu._safe_execute(  # type: ignore[attr-defined]
+                cypher, {"aid": source_account, "bid": target_account},
+            ) or []
+            results.extend(rows)
+
+        # Collect every post id along every chain so we can fetch
+        # human-readable text + author in one shot.
+        all_post_ids: list[str] = []
+        chains: list[list[str]] = []
+        for row in results:
+            chain = row.get("chain") or []
+            ids = []
+            for n in chain:
+                pid = (n.get("id") if isinstance(n, dict)
+                       else getattr(n, "id", None) or str(n))
+                ids.append(str(pid))
+            chains.append(ids)
+            all_post_ids.extend(ids)
+
+        # Hydrate post text + author from Postgres so the Report Writer
+        # gets natural-language context instead of opaque ids.
+        post_meta = _fetch_post_meta(set(all_post_ids))
 
         seen_posts: set[str] = set()
-        for row in rows:
-            ids = row.get("post_ids") or []
+        for ids in chains:
             prev = None
             for pid in ids:
-                pid = str(pid)
                 if pid not in seen_posts:
                     seen_posts.add(pid)
-                    out.nodes.append(KGNode(id=pid, label="Post"))
+                    meta = post_meta.get(pid, {})
+                    text = (meta.get("text") or "").strip()
+                    out.nodes.append(KGNode(
+                        id=pid, label="Post",
+                        properties={
+                            "author": meta.get("author") or "",
+                            "text": (text[:160]
+                                      if len(text) > 160 else text),
+                        },
+                    ))
                 if prev:
                     out.edges.append(KGEdge(
                         source_id=prev, target_id=pid, rel_type="Replied",
@@ -105,9 +168,9 @@ class KGQueryTool:
         for acc in (source_account, target_account):
             out.nodes.append(KGNode(id=acc, label="Account"))
 
-        out.metrics["paths_found"] = len(rows)
+        out.metrics["paths_found"] = len(results)
         out.metrics["max_path_length"] = max(
-            (len(r.get("post_ids") or []) for r in rows), default=0,
+            (len(r.get("chain") or []) for r in results), default=0,
         )
         out.elapsed_ms = int((time.monotonic() - t0) * 1000)
         return out
@@ -226,12 +289,18 @@ class KGQueryTool:
                     rel_type="Replied",
                 ))
 
-        # Constrain to the descendants ∪ {root} for the node set.
-        # `cascade_size` is computed from descendants only (excludes root).
-        for pid, author_id in post_authors.items():
+        # Hydrate readable text + author for every post in the cascade.
+        post_meta = _fetch_post_meta(set(post_authors))
+        for pid, account_id in post_authors.items():
+            meta = post_meta.get(pid, {})
+            text = (meta.get("text") or "").strip()
             out.nodes.append(KGNode(
                 id=pid, label="Post",
-                properties={"author_id": author_id or ""},
+                properties={
+                    "author_id": account_id or "",
+                    "author":    meta.get("author") or account_id or "",
+                    "text": (text[:160] if len(text) > 160 else text),
+                },
             ))
 
         out.metrics["cascade_size"] = max(0, len(post_authors) - 1)

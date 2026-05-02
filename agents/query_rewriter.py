@@ -74,6 +74,12 @@ KG-specialised intents (KEY UPGRADE; pick these whenever applicable):
   - propagation_trace   : "show how this rumour spread" / "trace the reply chain" /
                           "path from A to B" / "did X end up replying to Y" ->
                           KG only (multi-hop reply traversal; SQL can't do it)
+                          IMPORTANT: extract the two account ids and put
+                          them under targets.metadata_filter as
+                          {"source_account": "<id>", "target_account": "<id>"}.
+                          The runner cannot query without both. Account
+                          ids in this system look like "u_alice", "u_bob",
+                          or any handle the user provides verbatim.
   - influencer_query    : "who is most influential" / "top spreaders" /
                           "amplifiers" / "key opinion leaders" ->
                           KG (PageRank, not post count) + nl2sql for context

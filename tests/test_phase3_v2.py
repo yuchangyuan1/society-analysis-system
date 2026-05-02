@@ -255,19 +255,20 @@ def _kuzu_mock():
 
 def test_kg_propagation_path_returns_paths():
     kuzu = _kuzu_mock()
-    # Phase B.1: propagation_path now returns post-id chains via reply edges.
-    kuzu._safe_execute.return_value = [
-        {"post_ids": ["pa1", "pmid", "pb1"]},
+    # Phase C: propagation_path runs TWO directed Cypher queries (a->b
+    # and b->a) and merges. The mock returns nodes(path) raw chains.
+    chain = [{"id": "pa1"}, {"id": "pmid"}, {"id": "pb1"}]
+    # First call returns a hit, second returns nothing.
+    kuzu._safe_execute.side_effect = [
+        [{"chain": chain}],
+        [],
     ]
     tool = KGQueryTool(kuzu=kuzu)
     out = tool.propagation_path("alice", "bob", max_hops=4)
     assert out.query_kind == "propagation_path"
-    # Endpoints (Account nodes) must always appear in the output
     assert any(n.id == "alice" and n.label == "Account" for n in out.nodes)
     assert any(n.id == "bob" and n.label == "Account" for n in out.nodes)
-    # Post nodes from the path
     assert any(n.id == "pmid" and n.label == "Post" for n in out.nodes)
-    # Replied edges between consecutive posts
     edge_pairs = {(e.source_id, e.target_id) for e in out.edges}
     assert ("pa1", "pmid") in edge_pairs
     assert ("pmid", "pb1") in edge_pairs

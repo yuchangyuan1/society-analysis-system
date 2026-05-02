@@ -65,6 +65,23 @@ Hard rules:
 - Do NOT invent SQL rows, account ids, or chunk ids.
 - Keep the report under 300 words. Use bullet points for lists.
 - Output STRICT JSON only. No prose. No code fences.
+
+Graph (KG) presentation rules:
+- KG node ids look like `rc_b1`, `topic_xxx`, `ent_xxx` etc. They are
+  internal identifiers - DO NOT show them in the markdown.
+- For Post nodes use the `author` and `text` properties. Quote the text
+  excerpt directly (truncated as provided) and credit the `author`.
+  Format: "_<author>_: \"<text>\"" with the body in quotes.
+- For Account nodes use the id ONLY when the user explicitly mentioned
+  that handle (e.g. "u_alice"). Otherwise prefer the username/handle if
+  one is in `properties`.
+- For reply chains, write a flowing sentence like "alice's post about X
+  was replied to by bob (\"...\"), then by carol (\"...\")" rather than
+  a bare list of post ids.
+- For PageRank / Louvain / centrality: name the people, summarise their
+  scores in plain language ("most influential", "central bridge",
+  "tight cluster of N accounts"), and quote one or two characteristic
+  posts when post-level data is in the bundle.
 """
 
 
@@ -215,10 +232,20 @@ class ReportWriter:
                 if k.nodes:
                     sample = [
                         {"id": n.id, "label": n.label,
-                         "props": dict(list(n.properties.items())[:3])}
-                        for n in k.nodes[:5]
+                         "props": dict(list(n.properties.items())[:5])}
+                        for n in k.nodes[:8]
                     ]
-                    sections.append(f"    nodes: {json.dumps(sample, default=str)[:300]}")
+                    sections.append(
+                        f"    nodes: {json.dumps(sample, default=str)[:600]}"
+                    )
+                if k.edges:
+                    edge_sample = [
+                        f"{e.source_id} --{e.rel_type}--> {e.target_id}"
+                        for e in k.edges[:8]
+                    ]
+                    sections.append(
+                        "    edges: " + "; ".join(edge_sample)
+                    )
 
         return "\n".join(sections)
 

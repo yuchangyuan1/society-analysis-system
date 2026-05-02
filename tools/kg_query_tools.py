@@ -1,25 +1,30 @@
 """
-KG Query tools - redesign-2026-05 Phase 3.4.
+KG Query tools - redesign-2026-05-kg Phase B.
 
-Branch C (Knowledge Graph Query). Replaces the v1 NetworkX-on-JSON path.
-Pure Kuzu Cypher; NetworkX only used as a degraded analytics fallback when
-Kuzu is empty (community / centrality computed on the in-memory graph).
+Branch C (Knowledge Graph Query). Cypher-only operations against Kuzu.
+The companion module `agents/kg_analytics.py` covers NetworkX-backed
+algorithmic analyses (PageRank / Louvain / betweenness).
 
-Four query kinds:
-    1. propagation_path   - shortest path / k-hop reachability between accounts
-    2. key_nodes          - PageRank / degree centrality over a topic subgraph
-    3. community_relations - (account, account) co-posting + cross-community bridges
-    4. topic_correlation  - shared-entity strength between two topics
+Five query kinds (Phase B.1 + B.5):
+    1. propagation_path  - reply chain between two ACCOUNTS via Post-Post
+                           Replied edges, then bridges back to the authors
+    2. key_nodes         - top accounts in a topic by post count
+                           (Phase B.3 supersedes with PageRank in
+                           KGAnalytics.influencer_rank)
+    3. topic_correlation - shared-entity strength between two topics
+    4. cascade_tree      - full reply tree under a single root post
+    5. viral_cascade     - top-K longest / fastest cascades in a topic
 
-The legacy `tools/graph_tools.py` still serves the v1 capabilities path; we
-keep it untouched and ship the v2 entry points under a new module name
-(`kg_query_tools`) so the v2 chat link can pick them up cleanly.
+Removed in Phase B.6:
+    - community_relations  (replaced by KGAnalytics.coordinated_groups,
+                            which uses Louvain modularity instead of a
+                            naive co-posting count)
 """
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import structlog
 
@@ -41,39 +46,80 @@ class KGQueryTool:
                 log.warning("kg.kuzu_unavailable", error=str(exc)[:120])
                 self.kuzu = None
 
-    # ── Public entry points ───────────────────────────────────────────────────
+    # ── 1. propagation_path ──────────────────────────────────────────────────
 
     def propagation_path(
-        self, source_account: str, target_account: str,
-        max_hops: int = 4,
+        self,
+        source_account: str,
+        target_account: str,
+        max_hops: int = 6,
     ) -> KGOutput:
+        """Find a reply chain that connects two ACCOUNTS.
+
+        Walks the Post-[:Replied*]->Post backbone and returns the path
+        plus the involved authors. Reply edges go child -> parent in our
+        schema, so we expand both directions to handle "did A end up
+        responding to B" and "did B respond to A" symmetrically.
+        """
         t0 = time.monotonic()
-        out = KGOutput(query_kind="propagation_path",
-                       target={"source": source_account,
-                                "target": target_account,
-                                "max_hops": max_hops})
+        out = KGOutput(
+            query_kind="propagation_path",
+            target={"source": source_account, "target": target_account,
+                     "max_hops": max_hops},
+        )
         if not self.kuzu:
             out.elapsed_ms = int((time.monotonic() - t0) * 1000)
             return out
+
+        # Match a chain of reply edges between any post by source and any
+        # post by target, in either direction. Return the post ids in the
+        # path so we can reconstruct nodes.
+        cypher = (
+            "MATCH (a:Account {id: $aid})-[:Posted]->(pa:Post), "
+            "      (b:Account {id: $bid})-[:Posted]->(pb:Post), "
+            "      path = (pa)-[:Replied*1.." + str(max_hops) + "]-(pb) "
+            "RETURN [n IN nodes(path) | n.id] AS post_ids "
+            "LIMIT 5"
+        )
         rows = self.kuzu._safe_execute(  # type: ignore[attr-defined]
-            "MATCH p = (a:Account {id: $aid})-[:Posted|Replied*1.." + str(max_hops) +
-            "]->(b:Account {id: $bid}) "
-            "RETURN nodes(p) AS nodes_, rels(p) AS rels_ LIMIT 5",
-            {"aid": source_account, "bid": target_account},
+            cypher, {"aid": source_account, "bid": target_account},
         ) or []
+
+        seen_posts: set[str] = set()
         for row in rows:
-            for n in (row.get("nodes_") or []):
-                nid = (n.get("id") if isinstance(n, dict)
-                       else getattr(n, "id", str(n)))
-                out.nodes.append(KGNode(id=str(nid), label="Account",
-                                        properties={}))
+            ids = row.get("post_ids") or []
+            prev = None
+            for pid in ids:
+                pid = str(pid)
+                if pid not in seen_posts:
+                    seen_posts.add(pid)
+                    out.nodes.append(KGNode(id=pid, label="Post"))
+                if prev:
+                    out.edges.append(KGEdge(
+                        source_id=prev, target_id=pid, rel_type="Replied",
+                    ))
+                prev = pid
+
+        # Always include the two endpoint accounts so the report writer can
+        # show "alice -> bob" in prose.
+        for acc in (source_account, target_account):
+            out.nodes.append(KGNode(id=acc, label="Account"))
+
         out.metrics["paths_found"] = len(rows)
+        out.metrics["max_path_length"] = max(
+            (len(r.get("post_ids") or []) for r in rows), default=0,
+        )
         out.elapsed_ms = int((time.monotonic() - t0) * 1000)
         return out
 
-    def key_nodes(
-        self, topic_id: str, top_k: int = 10,
-    ) -> KGOutput:
+    # ── 2. key_nodes ─────────────────────────────────────────────────────────
+
+    def key_nodes(self, topic_id: str, top_k: int = 10) -> KGOutput:
+        """Top accounts in a topic by raw post count.
+
+        Phase B.3 introduces `KGAnalytics.influencer_rank` which uses
+        PageRank for "real" influence. This stays as the cheap fallback.
+        """
         t0 = time.monotonic()
         out = KGOutput(query_kind="key_nodes",
                        target={"topic_id": topic_id, "top_k": top_k})
@@ -98,43 +144,7 @@ class KGQueryTool:
         out.elapsed_ms = int((time.monotonic() - t0) * 1000)
         return out
 
-    def community_relations(
-        self, topic_id: str, min_shared_posts: int = 2,
-    ) -> KGOutput:
-        t0 = time.monotonic()
-        out = KGOutput(
-            query_kind="community_relations",
-            target={"topic_id": topic_id,
-                     "min_shared_posts": min_shared_posts},
-        )
-        if not self.kuzu:
-            out.elapsed_ms = int((time.monotonic() - t0) * 1000)
-            return out
-
-        # account pairs that posted in the same topic
-        rows = self.kuzu._safe_execute(  # type: ignore[attr-defined]
-            "MATCH (a1:Account)-[:Posted]->(p1:Post)-[:BelongsToTopic]->"
-            "(t:Topic {id: $tid})<-[:BelongsToTopic]-(p2:Post)<-[:Posted]-(a2:Account) "
-            "WHERE a1.id < a2.id "
-            "RETURN a1.id AS a, a2.id AS b, count(*) AS shared",
-            {"tid": topic_id},
-        ) or []
-        seen_nodes: set[str] = set()
-        for r in rows:
-            shared = int(r.get("shared", 0))
-            if shared < min_shared_posts:
-                continue
-            for nid in (r["a"], r["b"]):
-                if nid not in seen_nodes:
-                    seen_nodes.add(nid)
-                    out.nodes.append(KGNode(id=nid, label="Account"))
-            out.edges.append(KGEdge(
-                source_id=r["a"], target_id=r["b"], rel_type="CoPosted",
-                properties={"shared_posts": shared},
-            ))
-        out.metrics["pair_count"] = len(out.edges)
-        out.elapsed_ms = int((time.monotonic() - t0) * 1000)
-        return out
+    # ── 3. topic_correlation ─────────────────────────────────────────────────
 
     def topic_correlation(
         self, topic_a: str, topic_b: str,
@@ -164,5 +174,126 @@ class KGQueryTool:
                              "entity_type": r.get("entity_type", "")},
             ))
         out.metrics["shared_entity_count"] = len(out.nodes)
+        out.elapsed_ms = int((time.monotonic() - t0) * 1000)
+        return out
+
+    # ── 4. cascade_tree ──────────────────────────────────────────────────────
+
+    def cascade_tree(
+        self, root_post_id: str, max_depth: int = 10,
+    ) -> KGOutput:
+        """Recursively expand the reply tree rooted at a single post.
+
+        Returns every reachable Post node (regardless of topic / author)
+        plus every Replied edge, so the UI can draw a real cascade.
+        """
+        t0 = time.monotonic()
+        out = KGOutput(
+            query_kind="cascade_tree",
+            target={"root_post_id": root_post_id, "max_depth": max_depth},
+        )
+        if not self.kuzu:
+            out.elapsed_ms = int((time.monotonic() - t0) * 1000)
+            return out
+
+        # Collect every (child, parent) pair that descends from the root
+        # via any number of Replied hops up to max_depth. Reply edges go
+        # child -> parent, so we follow them in reverse from the root.
+        cypher = (
+            "MATCH (root:Post {id: $rid}) "
+            "OPTIONAL MATCH (root)<-[:Replied*1.." + str(max_depth) + "]-(child:Post) "
+            "WITH root, collect(DISTINCT child) AS descendants "
+            "WITH root, [root] + descendants AS all_posts "
+            "UNWIND all_posts AS p "
+            "OPTIONAL MATCH (p)-[:Replied]->(parent:Post) "
+            "OPTIONAL MATCH (a:Account)-[:Posted]->(p) "
+            "RETURN p.id AS post_id, parent.id AS parent_id, "
+            "       a.id AS account_id"
+        )
+        rows = self.kuzu._safe_execute(cypher, {"rid": root_post_id}) or []  # type: ignore[attr-defined]
+
+        post_authors: dict[str, Optional[str]] = {}
+        for r in rows:
+            pid = r.get("post_id")
+            if pid is None:
+                continue
+            post_authors[str(pid)] = r.get("account_id")
+            parent_id = r.get("parent_id")
+            if parent_id and pid != parent_id:
+                out.edges.append(KGEdge(
+                    source_id=str(pid),
+                    target_id=str(parent_id),
+                    rel_type="Replied",
+                ))
+
+        # Constrain to the descendants ∪ {root} for the node set.
+        # `cascade_size` is computed from descendants only (excludes root).
+        for pid, author_id in post_authors.items():
+            out.nodes.append(KGNode(
+                id=pid, label="Post",
+                properties={"author_id": author_id or ""},
+            ))
+
+        out.metrics["cascade_size"] = max(0, len(post_authors) - 1)
+        out.metrics["unique_authors"] = len(
+            {a for a in post_authors.values() if a}
+        )
+        out.metrics["depth_hint"] = len(out.edges)
+        out.elapsed_ms = int((time.monotonic() - t0) * 1000)
+        return out
+
+    # ── 5. viral_cascade ─────────────────────────────────────────────────────
+
+    def viral_cascade(
+        self, topic_id: str, top_k: int = 5,
+    ) -> KGOutput:
+        """Top-K most-amplified cascades inside a topic.
+
+        Ranks root posts by descendant count + unique-author count. Each
+        result row becomes a node carrying the cascade metrics so the
+        Report Writer can show "this rumour was reposted by 12 accounts
+        across a 3-deep reply chain in 4 hours".
+        """
+        t0 = time.monotonic()
+        out = KGOutput(
+            query_kind="viral_cascade",
+            target={"topic_id": topic_id, "top_k": top_k},
+        )
+        if not self.kuzu:
+            out.elapsed_ms = int((time.monotonic() - t0) * 1000)
+            return out
+
+        # Root posts of cascades = posts in this topic that themselves are
+        # NOT replies (no outgoing Replied edge to a parent). For each, count
+        # descendants and unique authors.
+        cypher = (
+            "MATCH (root:Post)-[:BelongsToTopic]->(t:Topic {id: $tid}) "
+            "WHERE NOT (root)-[:Replied]->(:Post) "
+            "OPTIONAL MATCH (root)<-[:Replied*1..10]-(child:Post) "
+            "OPTIONAL MATCH (a:Account)-[:Posted]->(child) "
+            "WITH root, count(DISTINCT child) AS cascade_size, "
+            "     count(DISTINCT a)            AS unique_authors "
+            "WHERE cascade_size > 0 "
+            "RETURN root.id AS root_id, root.text AS text, "
+            "       cascade_size, unique_authors "
+            "ORDER BY cascade_size DESC, unique_authors DESC LIMIT $k"
+        )
+        rows = self.kuzu._safe_execute(cypher,  # type: ignore[attr-defined]
+                                        {"tid": topic_id, "k": top_k}) or []
+
+        for r in rows:
+            out.nodes.append(KGNode(
+                id=str(r["root_id"]), label="Post",
+                properties={
+                    "text": (r.get("text") or "")[:200],
+                    "cascade_size": int(r.get("cascade_size", 0)),
+                    "unique_authors": int(r.get("unique_authors", 0)),
+                },
+            ))
+
+        out.metrics["cascade_count"] = len(rows)
+        out.metrics["max_cascade_size"] = max(
+            (int(r.get("cascade_size", 0)) for r in rows), default=0,
+        )
         out.elapsed_ms = int((time.monotonic() - t0) * 1000)
         return out

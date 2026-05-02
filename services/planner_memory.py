@@ -233,25 +233,57 @@ SEED_MODULE_CARDS: list[ModuleCard] = [
     ),
     ModuleCard(
         name="kg",
-        description=("Cypher queries over the Kuzu graph: propagation paths, "
-                      "key nodes, community relations, topic correlations."),
+        description=(
+            "The ONLY branch that can do multi-hop reply traversal, "
+            "centrality (PageRank / betweenness), and community detection "
+            "(Louvain) over the Kuzu graph. SQL cannot express any of "
+            "these - routing them to nl2sql produces shallow GROUP BY "
+            "answers that miss the structure of the spread."
+        ),
         when_to_use=[
-            "Who posted, replied, or co-posted with whom.",
-            "How information flowed between accounts or topics.",
-            "Identifying bridge accounts or key amplifiers.",
+            "Tracing a reply chain between two accounts (propagation_trace).",
+            "Identifying influence by PageRank, not raw post counts "
+            "(influencer_query).",
+            "Detecting coordinated posting / bot networks "
+            "(coordination_check, Louvain communities).",
+            "Diagnosing echo chambers / polarised clusters "
+            "(community_structure, modularity).",
+            "Surfacing viral cascades / longest reply threads "
+            "(cascade_query).",
+            "Answering 'who is amplifying' / 'how did this spread' / "
+            "'are they organised'.",
         ],
         when_not_to_use=[
-            "Counting posts by emotion - use nl2sql.",
-            "Verifying facts against external reports - use evidence.",
+            "Simple counts or filters that don't need graph structure - "
+            "use nl2sql.",
+            "Verifying facts against external authoritative reports - "
+            "use evidence.",
+            "Listing the text of posts in a topic - nl2sql is faster.",
         ],
         input_schema={
-            "query_kind": "propagation_path | key_nodes | community_relations | topic_correlation",
-            "target": "dict (topic_id / source_account / target_account / ...)",
+            "query_kind": (
+                "propagation_path | key_nodes | topic_correlation | "
+                "cascade_tree | viral_cascade | influencer_rank | "
+                "bridge_accounts | coordinated_groups | echo_chamber"
+            ),
+            "target": (
+                "dict (topic_id / source_account / target_account / "
+                "root_post_id / top_k / min_size)"
+            ),
         },
         output_schema={"kg_output": "KGOutput (nodes, edges, metrics)"},
         examples=[
-            {"question": "Who is amplifying topic T the most?"},
-            {"question": "Are accounts A and B in the same community?"},
+            {"question": "Show me how the vaccine rumour spread from "
+                          "alice to dave."},
+            {"question": "Who's the most influential account in the "
+                          "climate topic? (rank by PageRank, not post count)"},
+            {"question": "Is the surge of anti-vaccine posts coming from "
+                          "a coordinated group?"},
+            {"question": "Is topic T an echo chamber?"},
+            {"question": "What's the deepest reply thread under any "
+                          "post in this topic?"},
+            {"question": "Find the bridge accounts that connect the "
+                          "vaccine cluster and the climate cluster."},
         ],
     ),
 ]
@@ -301,5 +333,36 @@ SEED_WORKFLOW_EXEMPLARS: list[WorkflowExemplar] = [
         branches_used=["nl2sql", "kg", "evidence"],
         rationale="Topic content (nl2sql) + amplifiers (kg) + whether "
                   "official sources back it up (evidence).",
+    ),
+    # ── Phase C: KG-specialised exemplars ────────────────────────────────────
+    WorkflowExemplar(
+        question="Trace how the rumour spread from alice to dave through replies.",
+        branches_used=["kg"],
+        rationale="propagation_trace: multi-hop reply chain - "
+                  "SQL cannot express it.",
+    ),
+    WorkflowExemplar(
+        question="Who is most influential in the vaccine topic?",
+        branches_used=["kg", "nl2sql"],
+        rationale="influencer_query: PageRank from KG (real influence), "
+                  "post counts from nl2sql for context.",
+    ),
+    WorkflowExemplar(
+        question="Is this surge of posts coming from a coordinated group?",
+        branches_used=["kg"],
+        rationale="coordination_check: Louvain communities; SQL self-joins "
+                  "cannot do modularity optimisation.",
+    ),
+    WorkflowExemplar(
+        question="Is topic T an echo chamber?",
+        branches_used=["kg", "nl2sql"],
+        rationale="community_structure: KG modularity score + nl2sql for "
+                  "the within-cluster post sample.",
+    ),
+    WorkflowExemplar(
+        question="Show me the longest viral cascade in the climate topic.",
+        branches_used=["kg"],
+        rationale="cascade_query: viral_cascade ranks reply-tree depth; "
+                  "SQL cannot follow recursive replies.",
     ),
 ]

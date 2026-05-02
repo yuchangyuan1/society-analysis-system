@@ -36,6 +36,10 @@ class Post(BaseModel):
     topic_id: Optional[str] = None
     # redesign-2026-05 Phase 2.8: 64-bit simhash for near-duplicate detection
     simhash: Optional[int] = None
+    # redesign-2026-05-kg Phase A: Reddit comment / Telegram reply chains.
+    # When set, ingestion writes a Kuzu (this Post) -[:Replied]-> (parent Post)
+    # edge so propagation queries actually have multi-hop data.
+    parent_post_id: Optional[str] = None
 
     @property
     def has_image(self) -> bool:

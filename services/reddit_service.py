@@ -47,7 +47,8 @@ _HEADERS = {
 }
 _TIMEOUT        = 15    # seconds per request
 _REQ_DELAY      = 1.2   # seconds between requests (polite; stays under 60/min)
-_MAX_COMMENTS   = 8     # top-level comments to fetch per post
+_MAX_COMMENTS   = 100   # max comments fetched per post (across all depths)
+_MAX_DEPTH      = 3     # cap comment-tree depth (3 = post -> comment -> reply -> reply)
 _MIN_SCORE      = 1     # ignore comments below this score
 
 
@@ -146,7 +147,15 @@ def _parse_post(data: dict, subreddit: str) -> Optional[Post]:
     )
 
 
-def _parse_comment(data: dict, subreddit: str) -> Optional[Post]:
+def _parse_comment(
+    data: dict, subreddit: str, parent_post_id: Optional[str] = None,
+) -> Optional[Post]:
+    """Parse a Reddit comment into a Post.
+
+    `parent_post_id` is the id of the immediate parent (either the
+    submission or another comment). Setting it lets the v2 ingestion
+    write a Kuzu Replied edge so propagation queries have data.
+    """
     body = data.get("body", "") or ""
     if body in ("[removed]", "[deleted]", ""):
         return None
@@ -162,6 +171,7 @@ def _parse_comment(data: dict, subreddit: str) -> Optional[Post]:
         reply_count  = 0,
         retweet_count= 0,
         posted_at    = _ts(float(data.get("created_utc", 0))),
+        parent_post_id=parent_post_id,
     )
 
 
@@ -367,25 +377,55 @@ class RedditService:
         return None
 
     def _fetch_comments(
-        self, post_id: str, subreddit: str
+        self, post_id: str, subreddit: str,
     ) -> list[Post]:
-        """Fetch top-level comments for a post."""
-        url  = f"{_BASE}/r/{subreddit}/comments/{post_id}.json?limit={_MAX_COMMENTS}&raw_json=1"
+        """Fetch the comment tree for a post (BFS, depth-limited).
+
+        Each returned Post has `parent_post_id` set to the immediate parent
+        (either the submission post or another comment). Combined with
+        `agents/ingestion._store_post`'s Kuzu Replied edge writer, this
+        produces a real reply graph for KG propagation queries.
+
+        Caps:
+          - Total comments per post: `_MAX_COMMENTS` (default 100)
+          - Max depth: `_MAX_DEPTH` (default 3)
+          - Min score: `_MIN_SCORE` (default 1)
+        """
+        url = (f"{_BASE}/r/{subreddit}/comments/{post_id}.json"
+               f"?limit={_MAX_COMMENTS}&depth={_MAX_DEPTH}&raw_json=1")
         data = self._get_json(url)
         if not data or not isinstance(data, list) or len(data) < 2:
             return []
-
-        comments: list[Post] = []
-        children = data[1].get("data", {}).get("children", [])
-        for child in children[:_MAX_COMMENTS]:
-            d = child.get("data", {})
-            if child.get("kind") != "t1":
-                continue
-            if d.get("score", 0) < _MIN_SCORE:
-                continue
-            cp = _parse_comment(d, subreddit)
-            if cp:
-                comments.append(cp)
-
         time.sleep(_REQ_DELAY)
-        return comments
+
+        # The submission's stable Reddit post_id is "reddit_<post_id>" in
+        # our system (see _parse_post). Comments link back to it via t3_*.
+        submission_post_id = f"reddit_{post_id}"
+
+        out: list[Post] = []
+        children = data[1].get("data", {}).get("children", [])
+
+        def _walk(node: dict, parent_id: str, depth: int) -> None:
+            if len(out) >= _MAX_COMMENTS:
+                return
+            if depth > _MAX_DEPTH:
+                return
+            if node.get("kind") != "t1":
+                return
+            d = node.get("data", {})
+            if d.get("score", 0) < _MIN_SCORE:
+                return
+            cp = _parse_comment(d, subreddit, parent_post_id=parent_id)
+            if cp is None:
+                return
+            out.append(cp)
+            replies = (d.get("replies") or {})
+            if isinstance(replies, dict):
+                for sub in (replies.get("data", {}).get("children") or []):
+                    _walk(sub, parent_id=cp.id, depth=depth + 1)
+
+        for child in children:
+            _walk(child, parent_id=submission_post_id, depth=1)
+            if len(out) >= _MAX_COMMENTS:
+                break
+        return out

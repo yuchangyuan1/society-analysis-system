@@ -318,6 +318,14 @@ class IngestionAgent:
             self._kuzu.upsert_account(post.account_id, post.account_id)
             self._kuzu.upsert_post(post.id, post.text)
             self._kuzu.add_posted(post.account_id, post.id)
+            # redesign-2026-05-kg Phase A: write the Replied edge so
+            # propagation_path / cascade_tree queries have data to walk.
+            # The parent post may not be in Kuzu yet (parents come AFTER
+            # the child in some Reddit dumps); the edge is added in two
+            # passes so we just upsert a placeholder Post node here.
+            if post.parent_post_id:
+                self._kuzu.upsert_post(post.parent_post_id, "")
+                self._kuzu.add_replied(post.id, post.parent_post_id)
         except Exception as exc:
             log.warning("ingestion.kuzu_skip", post_id=post.id,
                         error=str(exc)[:120])

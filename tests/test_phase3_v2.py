@@ -255,15 +255,24 @@ def _kuzu_mock():
 
 def test_kg_propagation_path_returns_paths():
     kuzu = _kuzu_mock()
+    # Phase B.1: propagation_path now returns post-id chains via reply edges.
     kuzu._safe_execute.return_value = [
-        {"nodes_": [{"id": "a"}, {"id": "b"}, {"id": "c"}],
-         "rels_": []},
+        {"post_ids": ["pa1", "pmid", "pb1"]},
     ]
     tool = KGQueryTool(kuzu=kuzu)
-    out = tool.propagation_path("a", "c", max_hops=3)
+    out = tool.propagation_path("alice", "bob", max_hops=4)
     assert out.query_kind == "propagation_path"
-    assert any(n.id == "a" for n in out.nodes)
+    # Endpoints (Account nodes) must always appear in the output
+    assert any(n.id == "alice" and n.label == "Account" for n in out.nodes)
+    assert any(n.id == "bob" and n.label == "Account" for n in out.nodes)
+    # Post nodes from the path
+    assert any(n.id == "pmid" and n.label == "Post" for n in out.nodes)
+    # Replied edges between consecutive posts
+    edge_pairs = {(e.source_id, e.target_id) for e in out.edges}
+    assert ("pa1", "pmid") in edge_pairs
+    assert ("pmid", "pb1") in edge_pairs
     assert out.metrics["paths_found"] == 1
+    assert out.metrics["max_path_length"] == 3
 
 
 def test_kg_key_nodes_returns_top_authors():
@@ -277,16 +286,35 @@ def test_kg_key_nodes_returns_top_authors():
     assert {n.id for n in out.nodes} == {"u1", "u2"}
 
 
-def test_kg_community_relations_filters_by_min_shared():
+def test_kg_cascade_tree_collects_descendants():
     kuzu = _kuzu_mock()
     kuzu._safe_execute.return_value = [
-        {"a": "u1", "b": "u2", "shared": 3},
-        {"a": "u1", "b": "u3", "shared": 1},  # below threshold
+        {"post_id": "root", "parent_id": None, "account_id": "alice"},
+        {"post_id": "c1",   "parent_id": "root", "account_id": "bob"},
+        {"post_id": "c2",   "parent_id": "root", "account_id": "carol"},
+        {"post_id": "g1",   "parent_id": "c1",   "account_id": "dave"},
     ]
-    out = KGQueryTool(kuzu=kuzu).community_relations("topic_x", min_shared_posts=2)
-    assert out.metrics["pair_count"] == 1
-    edge = out.edges[0]
-    assert edge.properties["shared_posts"] == 3
+    out = KGQueryTool(kuzu=kuzu).cascade_tree("root", max_depth=5)
+    assert out.metrics["cascade_size"] == 3   # 4 posts - 1 root
+    assert out.metrics["unique_authors"] == 4
+    assert {(e.source_id, e.target_id) for e in out.edges} == {
+        ("c1", "root"), ("c2", "root"), ("g1", "c1"),
+    }
+
+
+def test_kg_viral_cascade_ranks_by_size():
+    kuzu = _kuzu_mock()
+    kuzu._safe_execute.return_value = [
+        {"root_id": "r1", "text": "A", "cascade_size": 5,
+         "unique_authors": 3},
+        {"root_id": "r2", "text": "B", "cascade_size": 2,
+         "unique_authors": 2},
+    ]
+    out = KGQueryTool(kuzu=kuzu).viral_cascade("topic_x", top_k=5)
+    assert out.metrics["cascade_count"] == 2
+    assert out.metrics["max_cascade_size"] == 5
+    assert out.nodes[0].id == "r1"
+    assert out.nodes[0].properties["cascade_size"] == 5
 
 
 def test_kg_topic_correlation_lists_shared_entities():

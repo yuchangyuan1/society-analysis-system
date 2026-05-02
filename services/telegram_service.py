@@ -155,6 +155,15 @@ def _tg_message_to_post(msg, channel_name: str) -> Optional[Post]:
     if msg.date:
         posted_at = msg.date.replace(tzinfo=timezone.utc) if msg.date.tzinfo is None else msg.date
 
+    # redesign-2026-05-kg Phase A: Telegram reply chain.
+    # `Message.reply_to.reply_to_msg_id` is set when the message is a reply;
+    # we map it to our Post id scheme so v2 ingestion writes a Replied edge.
+    parent_post_id: Optional[str] = None
+    reply_to = getattr(msg, "reply_to", None)
+    parent_msg_id = getattr(reply_to, "reply_to_msg_id", None) if reply_to else None
+    if parent_msg_id:
+        parent_post_id = f"tg_{channel_name}_{parent_msg_id}"
+
     return Post(
         id=f"tg_{channel_name}_{msg.id}",
         account_id=account_id,
@@ -166,6 +175,7 @@ def _tg_message_to_post(msg, channel_name: str) -> Optional[Post]:
         reply_count=getattr(msg.replies, "replies", 0) if msg.replies else 0,
         retweet_count=getattr(msg, "forwards", 0) or 0,
         posted_at=posted_at,
+        parent_post_id=parent_post_id,
     )
 
 
@@ -552,6 +562,14 @@ class TelegramService:
                 channel=_safe_log(channel_name),
                 transcript_chars=len(transcript),
             )
+            parent_post_id: Optional[str] = None
+            reply_to = getattr(msg, "reply_to", None)
+            parent_msg_id = (
+                getattr(reply_to, "reply_to_msg_id", None) if reply_to else None
+            )
+            if parent_msg_id:
+                parent_post_id = f"tg_{channel_name}_{parent_msg_id}"
+
             return Post(
                 id=f"tg_{channel_name}_{msg.id}",
                 account_id=account_id,
@@ -565,6 +583,7 @@ class TelegramService:
                 reply_count=getattr(msg.replies, "replies", 0) if msg.replies else 0,
                 retweet_count=getattr(msg, "forwards", 0) or 0,
                 posted_at=posted_at,
+                parent_post_id=parent_post_id,
             )
 
         except Exception as exc:

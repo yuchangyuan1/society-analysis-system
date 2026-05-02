@@ -50,10 +50,17 @@ class SQLOutput(BaseModel):
 # ── C. Knowledge Graph Query ─────────────────────────────────────────────────
 
 KGQueryKind = Literal[
+    # Cypher-only (KGQueryTool)
     "propagation_path",
     "key_nodes",
-    "community_relations",
     "topic_correlation",
+    "cascade_tree",
+    "viral_cascade",
+    # NetworkX-backed (KGAnalytics)
+    "influencer_rank",
+    "bridge_accounts",
+    "coordinated_groups",
+    "echo_chamber",
 ]
 
 

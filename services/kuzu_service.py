@@ -57,7 +57,10 @@ class KuzuService:
             # Account/Post/Topic/Entity nodes. Account doubles as the v2
             # User node. New rels:
             "CREATE REL TABLE IF NOT EXISTS Replied(FROM Post TO Post)",
-            "CREATE REL TABLE IF NOT EXISTS Liked(FROM Account TO Post)",
+            # `Liked` was defined for symmetry with social platforms but no
+            # data source feeds it (Reddit JSON does not expose per-user
+            # likes; Telegram reactions are aggregate counts, not edges).
+            # Removed in redesign-2026-05-kg Phase A.
             "CREATE REL TABLE IF NOT EXISTS HasEntity(FROM Post TO Entity)",
         ]
         for stmt in stmts:
@@ -197,12 +200,7 @@ class KuzuService:
             {"cid": child_post_id, "pid": parent_post_id},
         )
 
-    def add_liked(self, account_id: str, post_id: str) -> None:
-        self._safe_execute(
-            "MATCH (a:Account {id: $aid}), (p:Post {id: $pid}) "
-            "MERGE (a)-[:Liked]->(p)",
-            {"aid": account_id, "pid": post_id},
-        )
+    # add_liked was removed in redesign-2026-05-kg Phase A (no data source).
 
     def add_post_has_entity(self, post_id: str, entity_id: str) -> None:
         """Post -> Entity (v2 replacement for v1's Claim-only Mentions)."""

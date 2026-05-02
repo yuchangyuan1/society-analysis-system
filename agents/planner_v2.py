@@ -106,6 +106,12 @@ class _BranchRouter:
         "explain_decision":   ["nl2sql", "kg"],
         # Freeform: cast a wide net.
         "freeform":           ["evidence", "nl2sql"],
+        # ── KG-specialised (Phase C) ─────────────────────────────────────
+        "propagation_trace":   ["kg"],
+        "influencer_query":    ["kg", "nl2sql"],
+        "coordination_check":  ["kg"],
+        "community_structure": ["kg", "nl2sql"],
+        "cascade_query":       ["kg"],
     })
 
     def route(self, subtask: Subtask) -> list[BranchName]:
@@ -120,6 +126,20 @@ class _BranchRouter:
 _TOPIC_SCOPED_INTENTS = {
     "community_count", "community_listing", "trend",
     "propagation", "explain_decision",
+    # KG-specialised intents that benefit from semantic topic resolution
+    "influencer_query", "coordination_check", "community_structure",
+    "cascade_query",
+}
+
+
+# KG-specialised intent → (KG analytics method, default kwargs).
+# `propagation_trace` is handled separately (it expects two account ids).
+_KG_INTENT_TO_METHOD = {
+    "influencer_query":    ("influencer_rank",    {}),
+    "coordination_check":  ("coordinated_groups", {}),
+    "community_structure": ("echo_chamber",       {}),
+    "cascade_query":       ("viral_cascade",      {}),  # via KGQueryTool
+    "propagation_trace":   ("propagation_path",   {}),  # via KGQueryTool
 }
 
 
@@ -254,6 +274,14 @@ class BoundedPlannerV2:
                 payload["topic_id"] = sub.targets.topic_id
             if sub.targets.account_id:
                 payload["account_id"] = sub.targets.account_id
+            # propagation_trace needs two account anchors; the rewriter
+            # may stash them in metadata_filter or in the subtask text.
+            if sub.intent == "propagation_trace":
+                meta = sub.targets.metadata_filter or {}
+                if meta.get("source_account"):
+                    payload["source_account"] = meta["source_account"]
+                if meta.get("target_account"):
+                    payload["target_account"] = meta["target_account"]
             return payload
         return {}
 
@@ -393,26 +421,79 @@ def default_nl2sql_runner(inv: BranchInvocation) -> SQLOutput:
 
 
 def default_kg_runner(inv: BranchInvocation) -> KGOutput:
+    """Dispatch a KG branch invocation to the right tool.
+
+    Routing (Phase C):
+      propagation_trace   -> tools.kg_query_tools.propagation_path
+      cascade_query       -> tools.kg_query_tools.viral_cascade
+      influencer_query    -> agents.kg_analytics.influencer_rank (PageRank)
+      coordination_check  -> agents.kg_analytics.coordinated_groups (Louvain)
+      community_structure -> agents.kg_analytics.echo_chamber (modularity)
+      propagation         -> coordinated_groups (legacy alias)
+      anything else       -> influencer_rank as a sensible default
+    """
     from tools.kg_query_tools import KGQueryTool
-    tool = KGQueryTool()
+
     intent = inv.payload.get("intent", "freeform")
     topic_id = inv.payload.get("topic_id") or ""
 
-    # When the user didn't pin a topic but we still want graph context,
-    # pick the top trending topic so KG produces real signal instead of
-    # an empty placeholder.
-    if not topic_id:
+    # Anchor-less queries: try to back-fill from the most-discussed topic so
+    # KG actually produces signal.
+    if not topic_id and intent not in {
+        "propagation_trace", "coordination_check",
+    }:
         topic_id = _resolve_default_topic_id() or ""
 
-    if not topic_id:
-        # No graph anchor at all -> return an empty but well-formed output.
-        from models.branch_output import KGOutput as _KGOut
-        return _KGOut(query_kind="key_nodes",
-                       target={"reason": "no topic anchor available"})
+    # ── propagation_trace (KGQueryTool) ──────────────────────────────────────
+    if intent == "propagation_trace":
+        src = inv.payload.get("source_account") or ""
+        dst = inv.payload.get("target_account") or ""
+        if not src or not dst:
+            from models.branch_output import KGOutput as _KGOut
+            return _KGOut(
+                query_kind="propagation_path",
+                target={"reason": "missing source/target account"},
+            )
+        return KGQueryTool().propagation_path(
+            source_account=src, target_account=dst,
+            max_hops=int(inv.payload.get("max_hops", 6)),
+        )
 
-    if intent == "propagation":
-        return tool.community_relations(topic_id=topic_id)
-    return tool.key_nodes(topic_id=topic_id, top_k=10)
+    # ── cascade_query (KGQueryTool) ──────────────────────────────────────────
+    if intent == "cascade_query":
+        return KGQueryTool().viral_cascade(
+            topic_id=topic_id,
+            top_k=int(inv.payload.get("top_k", 5)),
+        )
+
+    # ── KGAnalytics methods (Phase B.3) ──────────────────────────────────────
+    from agents.kg_analytics import KGAnalytics
+    analytics = KGAnalytics()
+
+    if intent == "influencer_query":
+        return analytics.influencer_rank(
+            topic_id=topic_id or None,
+            top_k=int(inv.payload.get("top_k", 10)),
+        )
+    if intent in ("coordination_check", "propagation"):
+        return analytics.coordinated_groups(
+            topic_id=topic_id or None,
+            min_size=int(inv.payload.get("min_size", 3)),
+        )
+    if intent == "community_structure":
+        return analytics.echo_chamber(
+            topic_id=topic_id,
+            modularity_threshold=float(
+                inv.payload.get("modularity_threshold", 0.3),
+            ),
+        )
+
+    # Fallback: PageRank gives a more useful default than raw post counts.
+    if not topic_id:
+        from models.branch_output import KGOutput as _KGOut
+        return _KGOut(query_kind="influencer_rank",
+                       target={"reason": "no topic anchor available"})
+    return analytics.influencer_rank(topic_id=topic_id, top_k=10)
 
 
 def _resolve_default_topic_id() -> str | None:

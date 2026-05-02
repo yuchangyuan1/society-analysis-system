@@ -334,6 +334,11 @@ class PrecomputePipelineV2:
                     self._kuzu.add_posted(p.account_id, p.id)
                     if p.topic_id:
                         self._kuzu.add_belongs_to_topic(p.id, p.topic_id)
+                    # redesign-2026-05-kg Phase A: Replied edge.
+                    parent_id = getattr(p, "parent_post_id", None)
+                    if parent_id:
+                        self._kuzu.upsert_post(parent_id, "")
+                        self._kuzu.add_replied(p.id, parent_id)
                     for span in getattr(p, "entities", []) or []:
                         ent_id = f"ent_{uuid.uuid5(uuid.NAMESPACE_DNS, span.name.lower() + span.entity_type).hex[:12]}"
                         self._kuzu.upsert_entity(
@@ -343,6 +348,14 @@ class PrecomputePipelineV2:
                 except Exception as exc:
                     log.error("pipeline_v2.kuzu_write_error",
                               post_id=p.id, error=str(exc)[:120])
+
+        # redesign-2026-05-kg Phase C.4: invalidate the in-memory KG
+        # subgraph cache so subsequent analytics queries see fresh edges.
+        try:
+            from services.kg_cache import bump_write_seq
+            bump_write_seq()
+        except Exception:
+            pass
 
     # ── Stage helper ──────────────────────────────────────────────────────────
 

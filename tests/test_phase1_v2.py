@@ -321,6 +321,56 @@ def test_list_sources_returns_only_enabled():
 
 # ── PipelineV2 wiring smoke test ─────────────────────────────────────────────
 
+def test_persist_v2_writes_replied_edges_when_parent_post_id_present(
+    tmp_path: Path,
+):
+    """KG Phase A: parent_post_id should produce Kuzu Replied edges."""
+    from agents.precompute_pipeline_v2 import PrecomputePipelineV2
+
+    # 3 posts: root + 2 children replying to root
+    posts = [
+        Post(id="root", account_id="alice", text="root post"),
+        Post(id="c1", account_id="bob", text="reply 1",
+             parent_post_id="root"),
+        Post(id="c2", account_id="carol", text="reply 2",
+             parent_post_id="root"),
+    ]
+    ingestion = MagicMock()
+    ingestion.ingest_posts_from_jsonl.return_value = posts
+    knowledge = MagicMock()
+
+    kuzu = MagicMock()
+    pg = MagicMock()
+
+    pipeline = PrecomputePipelineV2(
+        ingestion=ingestion,
+        knowledge=knowledge,
+        multimodal=MagicMock(enrich_posts=MagicMock()),
+        entity_extractor=MagicMock(extract_for_posts=MagicMock()),
+        topic_clusterer=MagicMock(cluster=MagicMock(return_value=[])),
+        post_deduper=MagicMock(
+            annotate=MagicMock(),
+            find_duplicates=MagicMock(return_value=MagicMock(
+                duplicate_post_ids=set(),
+            )),
+        ),
+        schema_agent=None,
+        schema_sync=None,
+        pg=pg,
+        kuzu=kuzu,
+    )
+    pipeline.run(run_dir=tmp_path / "kg-run", jsonl_path="any.jsonl")
+
+    # Each child should have triggered an upsert_post(parent, "") + add_replied
+    add_replied_calls = kuzu.add_replied.call_args_list
+    edge_pairs = {(call.args[0], call.args[1])
+                  for call in add_replied_calls}
+    assert ("c1", "root") in edge_pairs
+    assert ("c2", "root") in edge_pairs
+    # Root has no parent_post_id; no spurious Replied edge should originate from it.
+    assert all(child != "root" for child, _ in edge_pairs)
+
+
 def test_pipeline_v2_runs_with_jsonl_fixture(tmp_path: Path, monkeypatch):
     """Ensure precompute_pipeline_v2 wires fetch + multimodal + entity correctly.
 

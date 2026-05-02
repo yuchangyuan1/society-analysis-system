@@ -86,15 +86,20 @@ def retrieve_kg(req: KGRequest) -> dict[str, Any]:
             topic_id=req.target.get("topic_id", ""),
             top_k=int(req.target.get("top_k", 10)),
         )
-    elif req.query_kind == "community_relations":
-        out = tool.community_relations(
-            topic_id=req.target.get("topic_id", ""),
-            min_shared_posts=int(req.target.get("min_shared_posts", 2)),
-        )
     elif req.query_kind == "topic_correlation":
         out = tool.topic_correlation(
             topic_a=req.target.get("topic_a", ""),
             topic_b=req.target.get("topic_b", ""),
+        )
+    elif req.query_kind == "cascade_tree":
+        out = tool.cascade_tree(
+            root_post_id=req.target.get("root_post_id", ""),
+            max_depth=int(req.target.get("max_depth", 10)),
+        )
+    elif req.query_kind == "viral_cascade":
+        out = tool.viral_cascade(
+            topic_id=req.target.get("topic_id", ""),
+            top_k=int(req.target.get("top_k", 5)),
         )
     else:
         raise HTTPException(status_code=400,

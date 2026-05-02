@@ -46,7 +46,7 @@ analysis system. Return STRICT JSON with this shape:
   "subtasks": [
     {
       "text": "self-contained rewritten question",
-      "intent": "fact_check | official_recap | community_count | community_listing | trend | propagation | comparison | explain_decision | freeform",
+      "intent": "fact_check | official_recap | community_count | community_listing | trend | propagation | comparison | explain_decision | freeform | propagation_trace | influencer_query | coordination_check | community_structure | cascade_query",
       "suggested_branches": ["evidence" | "nl2sql" | "kg", ...],
       "targets": {
         "run_id": null,
@@ -69,22 +69,45 @@ Rules:
 - "this claim" -> use session_context.current_claim_id
 - "compare A and B" -> two subtasks plus optionally a 3rd "comparison" subtask
   using "comparison" intent and both branches the children used.
+
+KG-specialised intents (KEY UPGRADE; pick these whenever applicable):
+  - propagation_trace   : "show how this rumour spread" / "trace the reply chain" /
+                          "path from A to B" / "did X end up replying to Y" ->
+                          KG only (multi-hop reply traversal; SQL can't do it)
+  - influencer_query    : "who is most influential" / "top spreaders" /
+                          "amplifiers" / "key opinion leaders" ->
+                          KG (PageRank, not post count) + nl2sql for context
+  - coordination_check  : "is this organised" / "coordinated posting" /
+                          "bot network" / "is there a campaign" ->
+                          KG only (Louvain community detection)
+  - community_structure : "echo chamber" / "are these in the same group" /
+                          "cluster" / "polarised" ->
+                          KG (modularity) + nl2sql for who-is-where
+  - cascade_query       : "viral" / "longest thread" / "deepest reply chain" /
+                          "what spread furthest" / "cascade size" ->
+                          KG only (cascade tree, viral_cascade ranking)
+
+Why KG-specialised: PageRank, betweenness, Louvain, k-hop reply paths, and
+cascade trees CANNOT be expressed in SQL. Routing these to nl2sql produces
+shallow GROUP-BY answers that miss the structure of the spread.
+
 - suggested_branches: prefer MULTI-BRANCH unless the question is a clear
   single-aggregation SQL job. Default mappings:
     fact_check                  -> ["evidence", "nl2sql"]
-        (official sources + does the community echo the claim?)
     official_recap              -> ["evidence", "nl2sql"]
-        (authoritative summary + community uptake)
     community_count             -> ["nl2sql"]      (pure aggregation)
-    community_listing           -> ["nl2sql", "kg"] (rows + who posted)
-    trend                       -> ["nl2sql", "kg"] (volume + amplifiers)
-    propagation                 -> ["kg", "nl2sql"] (graph + supporting volume)
+    community_listing           -> ["nl2sql", "kg"]
+    trend                       -> ["nl2sql", "kg"]
+    propagation                 -> ["kg", "nl2sql"]
     comparison                  -> ["evidence", "nl2sql", "kg"]
-        (canonical multi-source case)
-    explain_decision            -> ["nl2sql", "kg"] (data + structure)
-    freeform                    -> ["evidence", "nl2sql"] (cast wide)
-  You can override these when the user explicitly narrows scope, e.g.
-  "just count posts in topic T" -> only ["nl2sql"].
+    explain_decision            -> ["nl2sql", "kg"]
+    freeform                    -> ["evidence", "nl2sql"]
+    # KG-specialised:
+    propagation_trace           -> ["kg"]
+    influencer_query            -> ["kg", "nl2sql"]
+    coordination_check          -> ["kg"]
+    community_structure         -> ["kg", "nl2sql"]
+    cascade_query               -> ["kg"]
   Keep at most 3 branches per subtask.
 - targets.metadata_filter examples: {"tier": "reputable_media"} or
   {"source": "bbc"} for evidence; leave empty by default.
@@ -192,6 +215,10 @@ class QueryRewriter:
             "fact_check", "official_recap", "community_count",
             "community_listing", "trend", "propagation",
             "comparison", "explain_decision", "freeform",
+            # Phase C KG-specialised
+            "propagation_trace", "influencer_query",
+            "coordination_check", "community_structure",
+            "cascade_query",
         }
         for item in items[:3]:
             if not isinstance(item, dict):

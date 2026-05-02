@@ -22,10 +22,16 @@ SubtaskIntent = Literal[
     "community_count",     # filter / count / group on community posts
     "community_listing",   # show me the posts about X
     "trend",               # how is volume / sentiment changing
-    "propagation",         # who is amplifying, who replied to whom
+    "propagation",         # generic "who is amplifying" - kept for compat
     "comparison",          # contrast A vs B (multi-source)
     "explain_decision",    # why was X done (introspection)
     "freeform",            # fallback when no specific intent matches
+    # ── redesign-2026-05-kg Phase C: KG-specialised intents ────────────────
+    "propagation_trace",   # trace a reply chain between accounts / posts
+    "influencer_query",    # who is most influential (PageRank, not post count)
+    "coordination_check",  # are accounts coordinating? (Louvain communities)
+    "community_structure", # echo chamber / cluster question
+    "cascade_query",       # viral / longest thread / deepest cascade
 ]
 
 

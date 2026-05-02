@@ -28,8 +28,11 @@ from config import (
     TELEGRAM_API_ID,
     TELEGRAM_API_HASH,
     TELEGRAM_SESSION_PATH,
-    WHISPER_MAX_VIDEO_MB,
 )
+
+# redesign-2026-05 Phase 5: whisper service was removed; the video-post path
+# below is a no-op when whisper=None (default).
+WHISPER_MAX_VIDEO_MB = 100
 from models.post import Post
 
 log = structlog.get_logger(__name__)

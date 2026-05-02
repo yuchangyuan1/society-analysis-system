@@ -1,8 +1,0 @@
-{
-  "project": "society-multimodal-propagation-analysis",
-  "version": "1.0.0",
-  "agents": ["planner", "ingestion", "knowledge", "analysis", "risk", "critic", "visual", "report"],
-  "handoff_dir": "workspaces/shared/handoffs",
-  "services_cli": "python -m services.cli",
-  "notes": "Shared context for all agents. Do not store API keys or post content here."
-}

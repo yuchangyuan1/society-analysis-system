@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import artifacts, chat, runs
+from api.routes import artifacts, chat, reflection, retrieve, runs
 
 
 def _resolve_runs_root() -> Path:
@@ -44,6 +44,8 @@ app.state.runs_root = RUNS_ROOT
 app.include_router(runs.router)
 app.include_router(artifacts.router)
 app.include_router(chat.router)
+app.include_router(retrieve.router)
+app.include_router(reflection.router)
 
 
 @app.get("/")

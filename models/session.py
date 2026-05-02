@@ -17,6 +17,8 @@ class ConversationTurn(BaseModel):
     role: str                            # "user" | "assistant"
     content: str
     capability_used: Optional[str] = None
+    # redesign-2026-05 Phase 4: branches the v2 path actually invoked
+    branches_used: list[str] = Field(default_factory=list)
     at: datetime = Field(default_factory=datetime.utcnow)
 
 

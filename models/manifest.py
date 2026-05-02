@@ -1,8 +1,7 @@
 """
-RunManifest — reproducibility record for a single pipeline invocation.
-
-Every `python main.py ...` run creates one of these, written to
-`data/runs/{run_id}/run_manifest.json` (see ManifestService).
+RunManifest - tracks per-run identity, git sha, source parameters, and the
+post-snapshot fingerprint. Restored as a slim v2 model in Phase 5 cleanup
+(the v1 file was deleted along with the rest of the v1 surface).
 """
 from __future__ import annotations
 
@@ -13,15 +12,12 @@ from pydantic import BaseModel, Field
 
 
 class RunManifest(BaseModel):
+    schema_version: str = "v2"
     run_id: str
-    started_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime
     finished_at: Optional[datetime] = None
-
-    # Reproducibility
     git_sha: Optional[str] = None
     openai_model: Optional[str] = None
-
-    # Input parameters
     query_text: Optional[str] = None
     subreddits: list[str] = Field(default_factory=list)
     reddit_query: Optional[str] = None
@@ -31,11 +27,7 @@ class RunManifest(BaseModel):
     image_url: Optional[str] = None
     image_path: Optional[str] = None
     days_back: int = 7
-
-    # Key thresholds at time of run
-    thresholds: dict[str, float] = Field(default_factory=dict)
-
-    # Filled in at finalize()
+    thresholds: dict = Field(default_factory=dict)
     posts_snapshot_sha256: Optional[str] = None
     post_count: int = 0
     report_id: Optional[str] = None

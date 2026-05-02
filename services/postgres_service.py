@@ -15,7 +15,6 @@ import psycopg2.extras
 import structlog
 
 from config import POSTGRES_DSN
-from models import IncidentReport, RunLog, StageStatus
 
 log = structlog.get_logger(__name__)
 
@@ -63,120 +62,222 @@ class PostgresService:
                 else:
                     raise
 
-    # ── Posts ──────────────────────────────────────────────────────────────────
+    # The v1 helpers (upsert_post / upsert_image / upsert_account /
+    # upsert_claim / link_post_claim / increment_claim_propagation /
+    # get_claim) were deleted in redesign-2026-05 Phase 5 along with the
+    # `accounts / posts / images / claims / post_claims` tables. Use the
+    # v2 helpers below (upsert_post_v2 / upsert_topic_v2 / ...).
 
-    def upsert_post(self, post_id: str, account_id: str, text: str,
-                    lang: str = "en", retweet_count: int = 0,
-                    like_count: int = 0, reply_count: int = 0,
-                    has_image: bool = False,
-                    posted_at: Optional[datetime] = None) -> None:
+    # ── v2 (redesign-2026-05) ────────────────────────────────────────────────
+
+    def upsert_post_v2(
+        self,
+        *,
+        post_id: str,
+        account_id: str,
+        author: str,
+        text: str,
+        posted_at: Optional[datetime] = None,
+        subreddit: Optional[str] = None,
+        source: str = "reddit",
+        topic_id: Optional[str] = None,
+        dominant_emotion: Optional[str] = None,
+        emotion_score: float = 0.0,
+        like_count: int = 0,
+        reply_count: int = 0,
+        retweet_count: int = 0,
+        simhash: Optional[int] = None,
+        extra: Optional[dict] = None,
+    ) -> None:
+        """Upsert into posts_v2 (PROJECT_REDESIGN_V2.md Phase 2 5b)."""
         with self.cursor() as cur:
             cur.execute("""
-                INSERT INTO posts (id, account_id, text, lang, retweet_count,
-                                   like_count, reply_count, has_image, posted_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (id) DO UPDATE SET
-                    retweet_count = EXCLUDED.retweet_count,
-                    like_count    = EXCLUDED.like_count,
-                    reply_count   = EXCLUDED.reply_count
-            """, (post_id, account_id, text, lang, retweet_count,
-                  like_count, reply_count, has_image, posted_at))
-
-    def upsert_image(self, image_id: str, post_id: str, url: Optional[str],
-                     local_path: Optional[str], ocr_text: Optional[str],
-                     image_caption: Optional[str], image_type: Optional[str],
-                     embedding_id: Optional[str]) -> None:
-        with self.cursor() as cur:
-            cur.execute("""
-                INSERT INTO images (id, post_id, url, local_path, ocr_text,
-                                    image_caption, image_type, embedding_id)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (id) DO UPDATE SET
-                    ocr_text      = EXCLUDED.ocr_text,
-                    image_caption = EXCLUDED.image_caption,
-                    image_type    = EXCLUDED.image_type,
-                    embedding_id  = EXCLUDED.embedding_id
-            """, (image_id, post_id, url, local_path, ocr_text,
-                  image_caption, image_type, embedding_id))
-
-    def upsert_account(self, account_id: str, username: str,
-                       display_name: Optional[str] = None,
-                       verified: bool = False, followers: int = 0) -> None:
-        with self.cursor() as cur:
-            cur.execute("""
-                INSERT INTO accounts (id, username, display_name, verified, followers)
-                VALUES (%s,%s,%s,%s,%s)
-                ON CONFLICT (id) DO UPDATE SET
-                    followers = EXCLUDED.followers
-            """, (account_id, username, display_name, verified, followers))
-
-    # ── Claims ─────────────────────────────────────────────────────────────────
-
-    def upsert_claim(self, claim_id: str, normalized_text: str,
-                     first_seen_post: Optional[str] = None,
-                     propagation_count: int = 1,
-                     risk_level: Optional[str] = None) -> None:
-        with self.cursor() as cur:
-            cur.execute("""
-                INSERT INTO claims (id, normalized_text, first_seen_post,
-                                    propagation_count, risk_level, updated_at)
-                VALUES (%s,%s,%s,%s,%s,NOW())
-                ON CONFLICT (id) DO UPDATE SET
-                    propagation_count = EXCLUDED.propagation_count,
-                    risk_level        = EXCLUDED.risk_level,
-                    updated_at        = NOW()
-            """, (claim_id, normalized_text, first_seen_post,
-                  propagation_count, risk_level))
-
-    def link_post_claim(self, post_id: str, claim_id: str) -> None:
-        with self.cursor() as cur:
-            cur.execute("""
-                INSERT INTO post_claims (post_id, claim_id)
-                VALUES (%s,%s) ON CONFLICT (post_id, claim_id) DO NOTHING
-            """, (post_id, claim_id))
-
-    def increment_claim_propagation(self, claim_id: str) -> None:
-        with self.cursor() as cur:
-            cur.execute("""
-                UPDATE claims SET propagation_count = propagation_count + 1,
-                                   updated_at = NOW()
-                WHERE id = %s
-            """, (claim_id,))
-
-    def get_claim(self, claim_id: str) -> Optional[dict]:
-        with self.cursor() as cur:
-            cur.execute("SELECT * FROM claims WHERE id = %s", (claim_id,))
-            return cur.fetchone()
-
-    # ── Reports ────────────────────────────────────────────────────────────────
-
-    def save_report(self, report: IncidentReport) -> None:
-        with self.cursor() as cur:
-            cur.execute("""
-                INSERT INTO reports (id, intent_type, query_text, risk_level,
-                    requires_review, propagation_json, counter_message,
-                    visual_card_path, report_md)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (id) DO UPDATE SET
-                    risk_level       = EXCLUDED.risk_level,
-                    requires_review  = EXCLUDED.requires_review,
-                    counter_message  = EXCLUDED.counter_message,
-                    visual_card_path = EXCLUDED.visual_card_path,
-                    report_md        = EXCLUDED.report_md
+                INSERT INTO posts_v2 (post_id, account_id, author, text,
+                    posted_at, subreddit, source, topic_id,
+                    dominant_emotion, emotion_score,
+                    like_count, reply_count, retweet_count,
+                    simhash, extra)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (post_id) DO UPDATE SET
+                    text             = EXCLUDED.text,
+                    topic_id         = EXCLUDED.topic_id,
+                    dominant_emotion = EXCLUDED.dominant_emotion,
+                    emotion_score    = EXCLUDED.emotion_score,
+                    like_count       = EXCLUDED.like_count,
+                    reply_count      = EXCLUDED.reply_count,
+                    retweet_count    = EXCLUDED.retweet_count,
+                    simhash          = EXCLUDED.simhash,
+                    extra            = posts_v2.extra || EXCLUDED.extra
             """, (
-                report.id,
-                report.intent_type,
-                report.query_text,
-                report.risk_level,
-                report.requires_human_review,
-                json.dumps(report.propagation_summary.model_dump()
-                           if report.propagation_summary else {}),
-                report.counter_message,
-                report.visual_card_path,
-                report.report_md,
+                post_id, account_id, author, text, posted_at,
+                subreddit, source, topic_id, dominant_emotion,
+                emotion_score,
+                like_count, reply_count, retweet_count,
+                simhash,
+                json.dumps(extra or {}),
             ))
-            for entry in report.run_logs:
-                cur.execute("""
-                    INSERT INTO run_logs (report_id, stage, status, detail)
-                    VALUES (%s,%s,%s,%s)
-                """, (report.id, entry.stage, entry.status.value, entry.detail))
+
+    def upsert_topic_v2(
+        self,
+        *,
+        topic_id: str,
+        label: str,
+        post_count: int,
+        dominant_emotion: Optional[str] = None,
+        centroid_text: Optional[str] = None,
+        extra: Optional[dict] = None,
+    ) -> None:
+        with self.cursor() as cur:
+            cur.execute("""
+                INSERT INTO topics_v2 (topic_id, label, post_count,
+                    dominant_emotion, centroid_text, extra, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,NOW())
+                ON CONFLICT (topic_id) DO UPDATE SET
+                    label            = EXCLUDED.label,
+                    post_count       = EXCLUDED.post_count,
+                    dominant_emotion = EXCLUDED.dominant_emotion,
+                    centroid_text    = EXCLUDED.centroid_text,
+                    extra            = topics_v2.extra || EXCLUDED.extra,
+                    updated_at       = NOW()
+            """, (topic_id, label, post_count, dominant_emotion,
+                  centroid_text, json.dumps(extra or {})))
+
+    def upsert_entity_v2(
+        self,
+        *,
+        entity_id: str,
+        name: str,
+        entity_type: str,
+        mention_count: int = 1,
+    ) -> None:
+        with self.cursor() as cur:
+            cur.execute("""
+                INSERT INTO entities_v2 (entity_id, name, entity_type, mention_count)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT (entity_id) DO UPDATE SET
+                    mention_count = entities_v2.mention_count + EXCLUDED.mention_count
+            """, (entity_id, name, entity_type, mention_count))
+
+    def link_post_entity_v2(
+        self,
+        *,
+        post_id: str,
+        entity_id: str,
+        char_start: Optional[int] = None,
+        char_end: Optional[int] = None,
+        confidence: float = 0.5,
+    ) -> None:
+        with self.cursor() as cur:
+            cur.execute("""
+                INSERT INTO post_entities_v2 (post_id, entity_id,
+                    char_start, char_end, confidence)
+                VALUES (%s,%s,%s,%s,%s)
+                ON CONFLICT (post_id, entity_id) DO UPDATE SET
+                    confidence = EXCLUDED.confidence
+            """, (post_id, entity_id, char_start, char_end, confidence))
+
+    # ── schema_meta (Schema-aware Agent double-write) ────────────────────────
+
+    def upsert_schema_meta(
+        self,
+        *,
+        table_name: str,
+        column_name: str,
+        column_type: str,
+        description: str,
+        sample_values: list[str],
+        fingerprint: str,
+        in_extra: bool,
+    ) -> None:
+        with self.cursor() as cur:
+            cur.execute("""
+                INSERT INTO schema_meta (table_name, column_name, column_type,
+                    description, sample_values, fingerprint, in_extra, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,NOW())
+                ON CONFLICT (table_name, column_name) DO UPDATE SET
+                    column_type   = EXCLUDED.column_type,
+                    description   = EXCLUDED.description,
+                    sample_values = EXCLUDED.sample_values,
+                    fingerprint   = EXCLUDED.fingerprint,
+                    in_extra      = EXCLUDED.in_extra,
+                    updated_at    = NOW()
+            """, (table_name, column_name, column_type, description,
+                  json.dumps(sample_values), fingerprint, in_extra))
+
+    def list_schema_meta(self, table_name: Optional[str] = None) -> list[dict]:
+        with self.cursor() as cur:
+            if table_name:
+                cur.execute(
+                    "SELECT * FROM schema_meta WHERE table_name = %s "
+                    "ORDER BY column_name", (table_name,),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM schema_meta ORDER BY table_name, column_name"
+                )
+            return list(cur.fetchall())
+
+    def list_information_schema_columns(
+        self, table_name: str = "posts_v2",
+    ) -> list[dict]:
+        """Pull live column list from PG (used by consistency tests + rebuild)."""
+        with self.cursor() as cur:
+            cur.execute("""
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_name = %s AND table_schema = 'public'
+                ORDER BY ordinal_position
+            """, (table_name,))
+            return list(cur.fetchall())
+
+    # ── Full-text + similarity search (Posts not vectorised) ─────────────────
+
+    def search_posts_fulltext(
+        self, query: str, limit: int = 50,
+    ) -> list[dict]:
+        """English tsvector search; powers the NL2SQL keyword fallback."""
+        with self.cursor() as cur:
+            cur.execute("""
+                SELECT post_id, author, text, posted_at, topic_id,
+                       ts_rank(text_tsv, plainto_tsquery('english', %s)) AS rank
+                FROM posts_v2
+                WHERE text_tsv @@ plainto_tsquery('english', %s)
+                ORDER BY rank DESC LIMIT %s
+            """, (query, query, limit))
+            return list(cur.fetchall())
+
+    def search_posts_trgm(
+        self, query: str, similarity_threshold: float = 0.3, limit: int = 20,
+    ) -> list[dict]:
+        """pg_trgm fuzzy match, used as long-text dedup fallback."""
+        with self.cursor() as cur:
+            cur.execute("""
+                SELECT post_id, author, text, posted_at, topic_id,
+                       similarity(text, %s) AS sim
+                FROM posts_v2
+                WHERE similarity(text, %s) >= %s
+                ORDER BY sim DESC LIMIT %s
+            """, (query, query, similarity_threshold, limit))
+            return list(cur.fetchall())
+
+    def find_simhash_neighbours(
+        self, simhash: int, limit: int = 32,
+    ) -> list[dict]:
+        """Return candidate near-duplicate posts by exact simhash equality.
+
+        Hamming-distance comparison against the candidates is done in Python by
+        the dedup module (PG cannot easily compute population_count of XOR on
+        signed BIGINT pre-PG14 across all distros).
+        """
+        with self.cursor() as cur:
+            cur.execute("""
+                SELECT post_id, simhash, text, ingested_at
+                FROM posts_v2
+                WHERE simhash IS NOT NULL
+                ORDER BY ingested_at DESC LIMIT %s
+            """, (limit,))
+            return list(cur.fetchall())
+
+    # v1's save_report() was deleted in redesign-2026-05 Phase 5: the
+    # IncidentReport model is gone and the v2 chat path persists answers
+    # via session_store + reflection_log.

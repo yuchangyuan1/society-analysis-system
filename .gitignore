@@ -1,45 +1,99 @@
-# ── Secrets (never commit) ──────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────
+# Society Analysis - .gitignore (v2)
+# ───────────────────────────────────────────────────────────────────────────
+
+# ── Secrets / credentials (never commit) ──────────────────────────────────
 .env
 .env.local
 .env.*.local
 *.pem
 *.key
+*.session
+*.session-journal
 
-# ── Python ──────────────────────────────────────────────────────────
+# ── Python ────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+*.egg
 *.egg-info/
+.eggs/
 build/
 dist/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+develop-eggs/
+pip-log.txt
 
-# ── Virtual environments ────────────────────────────────────────────
+# ── Virtual environments ──────────────────────────────────────────────────
 .venv/
 venv/
 env/
+ENV/
+.python-version
 
-# ── Runtime data (regeneratable; pipeline + chat recreate on first run) ──
-data/
+# ── Test / coverage ───────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.cache
+.hypothesis/
+coverage.xml
 
-# ── OS ──────────────────────────────────────────────────────────────
+# ── Type checking / linting ───────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+.pyre/
+.ruff_cache/
+
+# ── Editors / IDEs ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+*~
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ── IDEs ────────────────────────────────────────────────────────────
-.idea/
-.vscode/
-*.swp
-*.swo
-.cursor/
+# ── Jupyter ───────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
 
-# ── Claude Code / local agent state ─────────────────────────────────
+# ── Claude Code / local agent state ───────────────────────────────────────
 .claude/
 
-# ── Logs ────────────────────────────────────────────────────────────
+# ── Project runtime data ──────────────────────────────────────────────────
+# Everything under data/ is regeneratable: pipeline + chat recreate it.
+# Keep the directory itself (so checkout doesn't fail) but ignore contents.
+data/chroma/
+data/kuzu_graph
+data/kuzu_graph.wal
+data/kuzu_graph.lock
+data/runs/
+data/sessions/
+data/official_chunks/
+data/raw_media/
+data/whisper_tmp/
+data/*.db
+data/*.jsonl
+
+# ── Streamlit ─────────────────────────────────────────────────────────────
+.streamlit/secrets.toml
+
+# ── Logs ──────────────────────────────────────────────────────────────────
 *.log
+logs/
+
+# ── Tests: ignore user-local fixtures, keep committed ones ────────────────
+tests/fixtures/local_*
+
+# ── Build / deploy ────────────────────────────────────────────────────────
+*.pid
+*.sock
+.docker/
+.terraform/
+*.tfstate
+*.tfstate.*

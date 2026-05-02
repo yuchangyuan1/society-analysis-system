@@ -144,7 +144,13 @@ def _process_turn(prompt: str) -> None:
             }
         )
 
-        analysis_tabs.route_capability_to_panels(cap_name, cap_output)
+        # redesign-2026-05 Phase 4.6: prefer v2 branch routing when present
+        branches_used = resp.get("branches_used") or []
+        branch_outputs = resp.get("branch_outputs") or {}
+        if branches_used or branch_outputs:
+            analysis_tabs.route_branches_to_panels(branches_used, branch_outputs)
+        else:
+            analysis_tabs.route_capability_to_panels(cap_name, cap_output)
 
     _refresh_breadcrumb()
 

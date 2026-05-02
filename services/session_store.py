@@ -54,6 +54,7 @@ def append_turn(
     role: str,
     content: str,
     capability_used: Optional[str] = None,
+    branches_used: Optional[list[str]] = None,
 ) -> SessionState:
     """Append a conversation turn in-place and return the state."""
     state.conversation.append(
@@ -61,6 +62,7 @@ def append_turn(
             role=role,
             content=content,
             capability_used=capability_used,
+            branches_used=list(branches_used or []),
             at=datetime.utcnow(),
         )
     )

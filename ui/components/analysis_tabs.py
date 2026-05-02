@@ -35,6 +35,39 @@ def reset_panels() -> None:
         st.session_state.pop(k, None)
 
 
+def route_branches_to_panels(
+    branches_used: list[str], branch_outputs: dict[str, Any],
+) -> None:
+    """redesign-2026-05 Phase 4.6: route v2 branch outputs into panels.
+
+    Mapping (PROJECT_REDESIGN_V2.md UI section, adjusted for v2 branches):
+        evidence -> Evidence panel
+        nl2sql   -> Topic + Metrics panels (whichever has rows)
+        kg       -> Graph panel
+    """
+    if not branches_used and not branch_outputs:
+        return
+    if "evidence" in branch_outputs and branch_outputs["evidence"]:
+        st.session_state["panel_evidence"] = {
+            "source": "evidence",
+            "data": branch_outputs["evidence"][0],
+        }
+    if "nl2sql" in branch_outputs and branch_outputs["nl2sql"]:
+        st.session_state["panel_topic"] = {
+            "source": "nl2sql",
+            "data": branch_outputs["nl2sql"][0],
+        }
+        st.session_state["panel_metrics"] = {
+            "source": "nl2sql",
+            "data": branch_outputs["nl2sql"][0],
+        }
+    if "kg" in branch_outputs and branch_outputs["kg"]:
+        st.session_state["panel_graph"] = {
+            "source": "kg",
+            "data": branch_outputs["kg"][0],
+        }
+
+
 def route_capability_to_panels(
     capability_name: Optional[str], output: dict[str, Any]
 ) -> None:
@@ -44,6 +77,9 @@ def route_capability_to_panels(
     `output["aux_outputs"]` (see agents/planner.py). We route those too so a
     `claim_verification_flow` can populate both the Evidence tab (primary)
     and the Graph tab (from its `propagation_context` step).
+
+    DEPRECATED for the v2 chat path: prefer route_branches_to_panels.
+    Kept as fallback when only the legacy `capability_used` field is set.
     """
     if not output or "error" in output:
         return

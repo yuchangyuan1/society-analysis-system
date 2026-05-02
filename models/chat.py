@@ -33,9 +33,18 @@ class ChatResponse(BaseModel):
     `capability_output` is the raw Pydantic output from the capability,
     serialized to dict. The UI uses it for rich rendering; callers that
     only want the text can read `answer_text`.
+
+    redesign-2026-05 Phase 4: v2 path also fills `branches_used`,
+    `branch_outputs`, `citations`, and `needs_human_review`. v1 fields are
+    kept populated where possible for backwards compatibility.
     """
     session_id: str
     answer_text: str
     capability_used: Optional[str] = None
     capability_output: Optional[dict[str, Any]] = None
     visual_paths: list[str] = Field(default_factory=list)
+    # v2 additions
+    branches_used: list[str] = Field(default_factory=list)
+    branch_outputs: dict[str, Any] = Field(default_factory=dict)
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    needs_human_review: bool = False

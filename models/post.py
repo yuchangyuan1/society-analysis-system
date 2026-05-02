@@ -27,9 +27,15 @@ class Post(BaseModel):
     reply_count: int = 0
     posted_at: Optional[datetime] = None
     images: list[ImageAsset] = Field(default_factory=list)
-    # Phase 0: Emotional State (图2 — Emotional State)
+    # Phase 0: Emotional State
     emotion: str = ""          # fear | anger | hope | disgust | neutral
-    emotion_score: float = 0.0 # 0.0–1.0 intensity
+    emotion_score: float = 0.0 # 0.0-1.0 intensity
+    # redesign-2026-05 Phase 1.4: post-level entities (replaces v1 NamedEntity-on-claim)
+    entities: list = Field(default_factory=list)  # list[EntitySpan]
+    # redesign-2026-05 Phase 2: topic_id assigned by post-level clustering
+    topic_id: Optional[str] = None
+    # redesign-2026-05 Phase 2.8: 64-bit simhash for near-duplicate detection
+    simhash: Optional[int] = None
 
     @property
     def has_image(self) -> bool:

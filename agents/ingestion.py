@@ -19,8 +19,12 @@ from services.claude_vision_service import ClaudeVisionService
 from services.kuzu_service import KuzuService
 from services.postgres_service import PostgresService
 from services.telegram_service import TelegramService
-from services.x_api_service import XApiService
 from services.reddit_service import RedditService
+
+# X API was retired in redesign-2026-05 Phase 5 cleanup. The IngestionAgent
+# still accepts a placeholder kwarg so existing call sites that pass
+# `x_api=None` keep working.
+XApiService = None  # type: ignore[assignment]
 
 log = structlog.get_logger(__name__)
 
@@ -81,7 +85,7 @@ class IngestionAgent:
 
         log.info("ingestion.fetched_posts",
                  count=len(posts), query=search_query,
-                 source="telegram" if isinstance(api, TelegramService) else "x_api")
+                 source="telegram" if isinstance(api, TelegramService) else "external")
         for post in posts:
             self._store_post(post)
         return posts
@@ -131,7 +135,7 @@ class IngestionAgent:
 
         log.info("ingestion.multi_keyword_fetched",
                  count=len(posts),
-                 source="telegram" if isinstance(api, TelegramService) else "x_api")
+                 source="telegram" if isinstance(api, TelegramService) else "external")
         for post in posts:
             self._store_post(post)
         return posts
@@ -213,8 +217,25 @@ class IngestionAgent:
         return posts
 
     def ingest_posts_from_jsonl(self, filepath: str) -> list[Post]:
-        """Load pre-collected posts from a JSONL file and store them."""
-        posts = self._x_api.load_from_jsonl(filepath)
+        """Load pre-collected posts from a JSONL file and store them.
+
+        Replaces the v1 path through XApiService.load_from_jsonl (XApiService
+        was retired in redesign-2026-05 Phase 5).
+        """
+        import json
+        from pathlib import Path
+
+        posts: list[Post] = []
+        for line in Path(filepath).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                posts.append(Post.model_validate(data))
+            except Exception as exc:
+                log.warning("ingestion.jsonl_skip",
+                            error=str(exc)[:120], line=line[:80])
         log.info("ingestion.loaded_jsonl", count=len(posts))
         for post in posts:
             self._store_post(post)
@@ -250,17 +271,9 @@ class IngestionAgent:
                     image_id=img.id,
                     reason=vision_result.get("error", ""),
                 )
-            # Persist
-            self._pg.upsert_image(
-                image_id=img.id,
-                post_id=post.id,
-                url=img.url,
-                local_path=img.local_path,
-                ocr_text=img.ocr_text,
-                image_caption=img.image_caption,
-                image_type=img.image_type,
-                embedding_id=img.embedding_id,
-            )
+            # v1 `images` table was deleted in Phase 5; image attributes now
+            # live on the in-memory Post and are folded into post.text via
+            # Post.merged_text() before any downstream consumer sees them.
             updated_images.append(img)
         post.images = updated_images
         return post
@@ -296,23 +309,15 @@ class IngestionAgent:
         return q or query[:60]
 
     def _store_post(self, post: Post) -> None:
-        # Postgres — non-fatal: system degrades gracefully without it
+        # redesign-2026-05 Phase 5: v1 Postgres tables (accounts, posts) were
+        # deleted. Persistence to PG happens in PrecomputePipelineV2.persist_v2
+        # via upsert_post_v2 / upsert_topic_v2 / upsert_entity_v2.
+        # Here we only mirror the post into the Kuzu graph so Branch C
+        # has nodes to walk during the same run.
         try:
-            self._pg.upsert_account(post.account_id, post.account_id)
-            self._pg.upsert_post(
-                post_id=post.id,
-                account_id=post.account_id,
-                text=post.text,
-                lang=post.lang,
-                retweet_count=post.retweet_count,
-                like_count=post.like_count,
-                reply_count=post.reply_count,
-                has_image=post.has_image,
-                posted_at=post.posted_at,
-            )
+            self._kuzu.upsert_account(post.account_id, post.account_id)
+            self._kuzu.upsert_post(post.id, post.text)
+            self._kuzu.add_posted(post.account_id, post.id)
         except Exception as exc:
-            log.warning("ingestion.postgres_skip", post_id=post.id, error=str(exc)[:80])
-        # Kuzu
-        self._kuzu.upsert_account(post.account_id, post.account_id)
-        self._kuzu.upsert_post(post.id, post.text)
-        self._kuzu.add_posted(post.account_id, post.id)
+            log.warning("ingestion.kuzu_skip", post_id=post.id,
+                        error=str(exc)[:120])

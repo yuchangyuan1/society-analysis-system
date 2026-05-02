@@ -1,31 +1,38 @@
-from .postgres_service import PostgresService
-from .chroma_service import ChromaService
-from .kuzu_service import KuzuService
-from .x_api_service import XApiService
-from .telegram_service import TelegramService
+"""Services (v2) - redesign-2026-05.
+
+The v1 services that were specific to the deleted intervention / visual /
+counter-message arms are gone (stable_diffusion_service,
+intervention_decision_service, actionability_service, x_api_service,
+counter_effect_service, monitor_service, cli, answer_composer).
+"""
+from .chroma_collections import ChromaCollections
 from .claude_vision_service import ClaudeVisionService
 from .embeddings_service import EmbeddingsService
-from .stable_diffusion_service import StableDiffusionService
-from .news_search_service import NewsSearchService
-from .whisper_service import WhisperService
-from .reddit_service import RedditService
+from .kuzu_service import KuzuService
 from .manifest_service import ManifestService
-from .metrics_service import MetricsService
+from .news_search_service import NewsSearchService
+from .nl2sql_memory import NL2SQLMemory
+from .planner_memory import PlannerMemory
+from .postgres_service import PostgresService
+from .reddit_service import RedditService
+from .reflection_store import ReflectionStore
+from .schema_sync import SchemaSync
+from .telegram_service import TelegramService
 from .wikipedia_service import WikipediaService
 
 __all__ = [
-    "PostgresService",
-    "ChromaService",
-    "KuzuService",
-    "XApiService",
-    "TelegramService",
+    "ChromaCollections",
     "ClaudeVisionService",
     "EmbeddingsService",
-    "StableDiffusionService",
-    "NewsSearchService",
-    "WhisperService",
-    "RedditService",
+    "KuzuService",
     "ManifestService",
-    "MetricsService",
+    "NewsSearchService",
+    "NL2SQLMemory",
+    "PlannerMemory",
+    "PostgresService",
+    "RedditService",
+    "ReflectionStore",
+    "SchemaSync",
+    "TelegramService",
     "WikipediaService",
 ]

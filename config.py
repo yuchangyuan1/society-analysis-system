@@ -19,9 +19,6 @@ DATA_DIR = BASE_DIR / "data"
 
 CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", str(DATA_DIR / "chroma"))
 KUZU_DB_DIR: str = os.getenv("KUZU_DB_DIR", str(DATA_DIR / "kuzu_graph"))
-RAW_MEDIA_DIR: str = os.getenv("RAW_MEDIA_DIR", str(DATA_DIR / "raw_media"))
-COUNTER_VISUALS_DIR: str = os.getenv("COUNTER_VISUALS_DIR", str(DATA_DIR / "counter_visuals"))
-COUNTER_EFFECTS_DB: str = os.getenv("COUNTER_EFFECTS_DB", str(DATA_DIR / "counter_effects.db"))
 RUNS_DIR: str = os.getenv("RUNS_DIR", str(DATA_DIR / "runs"))
 
 # ── API keys ───────────────────────────────────────────────────────────────────
@@ -33,12 +30,6 @@ if not OPENAI_API_KEY:
         "OPENAI_API_KEY is not set.\n"
         "Add OPENAI_API_KEY=sk-... to your .env file."
     )
-
-X_BEARER_TOKEN: str = os.getenv("X_BEARER_TOKEN", "")
-X_API_KEY: str = os.getenv("X_API_KEY", "")
-X_API_SECRET: str = os.getenv("X_API_SECRET", "")
-X_ACCESS_TOKEN: str = os.getenv("X_ACCESS_TOKEN", "")
-X_ACCESS_TOKEN_SECRET: str = os.getenv("X_ACCESS_TOKEN_SECRET", "")
 
 # ── Telegram (MTProto — data collection) ───────────────────────────────────────
 TELEGRAM_API_ID: str = os.getenv("TELEGRAM_API_ID", "")
@@ -57,28 +48,45 @@ POSTGRES_DSN: str = os.getenv(
 # Switch to "gpt-4o-mini" for lower cost at the expense of quality.
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
 
-# ── Stable Diffusion ───────────────────────────────────────────────────────────
-SD_MODEL_ID: str = os.getenv("SD_MODEL_ID", "stabilityai/stable-diffusion-2-1")
-SD_DEVICE: str = os.getenv("SD_DEVICE", "cpu")
-
 # ── Embedding model ────────────────────────────────────────────────────────────
 EMBEDDING_MODEL: str = "text-embedding-3-small"
 EMBEDDING_DIM: int = 1536
 
 # ── Chroma collection names ────────────────────────────────────────────────────
-CHROMA_CLAIMS_COLLECTION: str = "claims"
-CHROMA_ARTICLES_COLLECTION: str = "articles"
+# redesign-2026-05 Phase 2: three-collection split (PROJECT_REDESIGN_V2.md 5b)
+CHROMA_OFFICIAL_COLLECTION: str = os.getenv(
+    "CHROMA_OFFICIAL_COLLECTION", "chroma_official"
+)
+CHROMA_NL2SQL_COLLECTION: str = os.getenv(
+    "CHROMA_NL2SQL_COLLECTION", "chroma_nl2sql"
+)
+CHROMA_PLANNER_COLLECTION: str = os.getenv(
+    "CHROMA_PLANNER_COLLECTION", "chroma_planner"
+)
 
-# ── Claim deduplication thresholds ────────────────────────────────────────────
-CLAIM_EMBED_SIM_HIGH: float = 0.92   # → candidate SAME; check with LLM
-CLAIM_EMBED_SIM_LOW: float = 0.85    # → new claim (skip LLM check)
+# Conflict-replacement thresholds (PROJECT_REDESIGN_V2.md 7c-H, Q11=B)
+# Three-tier policy:
+#   < SIM_TIER_LOW          -> append (no conflict check)
+#   [SIM_TIER_LOW, SIM_TIER_HIGH) -> direct overwrite (no LLM)
+#   >= SIM_TIER_HIGH        -> LLM-arbitrated pairwise comparison
+NL2SQL_CONFLICT_SIM_LOW: float = float(os.getenv("NL2SQL_CONFLICT_SIM_LOW", "0.92"))
+NL2SQL_CONFLICT_SIM_HIGH: float = float(os.getenv("NL2SQL_CONFLICT_SIM_HIGH", "0.95"))
 
-# ── Critic retry limit ─────────────────────────────────────────────────────────
-CRITIC_MAX_RETRIES: int = 2
+# redesign-2026-05 Phase 3: NL2SQL safety + repair limits
+# Read-only DSN takes precedence over POSTGRES_DSN when set.
+POSTGRES_READONLY_DSN: str = os.getenv("POSTGRES_READONLY_DSN", "")
+NL2SQL_MAX_REPAIR_ROUNDS: int = int(os.getenv("NL2SQL_MAX_REPAIR_ROUNDS", "3"))
+NL2SQL_RESULT_ROW_LIMIT: int = int(os.getenv("NL2SQL_RESULT_ROW_LIMIT", "1000"))
+NL2SQL_STATEMENT_TIMEOUT_MS: int = int(os.getenv("NL2SQL_STATEMENT_TIMEOUT_MS", "5000"))
 
-# ── Visual card dimensions (X post format) ─────────────────────────────────────
-VISUAL_WIDTH: int = 1200
-VISUAL_HEIGHT: int = 675
+# redesign-2026-05 Phase 5: experience decay
+# Records below this confidence are considered stale and decayed away.
+EXPERIENCE_MIN_CONFIDENCE: float = float(
+    os.getenv("EXPERIENCE_MIN_CONFIDENCE", "0.2")
+)
+# Records last used more than this many days ago are decayed (skipped for
+# kind=schema and kind=module_card which are intentionally permanent).
+EXPERIENCE_TTL_DAYS: int = int(os.getenv("EXPERIENCE_TTL_DAYS", "30"))
 
 # ── Reddit API ────────────────────────────────────────────────────────────────
 # No credentials needed — uses Reddit's public JSON API directly.
@@ -97,13 +105,20 @@ REDDIT_DEFAULT_SUBREDDITS: list[str] = [
     if s.strip()
 ]
 
-# ── Whisper (video transcription) ─────────────────────────────────────────────
-# Model sizes: tiny / base / small / medium / large
-# "base" (≈500 MB RAM) is recommended for most machines.
-WHISPER_MODEL_SIZE: str = os.getenv("WHISPER_MODEL_SIZE", "base")
-WHISPER_TEMP_DIR: str = os.getenv("WHISPER_TEMP_DIR", str(DATA_DIR / "whisper_tmp"))
-# Skip transcription for videos larger than this (MB) to avoid long waits
-WHISPER_MAX_VIDEO_MB: int = int(os.getenv("WHISPER_MAX_VIDEO_MB", "100"))
-
 # ── Logging ────────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
+# ── redesign-2026-05: multimodal sampling + budget ─────────────────────────────
+# Daily USD budget for multimodal (image-understanding) calls. The pipeline
+# skips remaining calls once the daily budget is consumed.
+# Estimate: ~$0.01-0.03 per Claude Vision call.
+MULTIMODAL_DAILY_BUDGET_USD: float = float(
+    os.getenv("MULTIMODAL_DAILY_BUDGET_USD", "5.0")
+)
+# Per-call cost estimate for budget accounting (USD).
+MULTIMODAL_COST_PER_CALL_USD: float = float(
+    os.getenv("MULTIMODAL_COST_PER_CALL_USD", "0.02")
+)
+# Sampling thresholds: only run multimodal on posts that exceed either.
+MULTIMODAL_MIN_LIKES: int = int(os.getenv("MULTIMODAL_MIN_LIKES", "50"))
+MULTIMODAL_MIN_REPLIES: int = int(os.getenv("MULTIMODAL_MIN_REPLIES", "20"))

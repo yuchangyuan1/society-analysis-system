@@ -1,0 +1,72 @@
+# redesign-2026-05 Phase 1.5 - official-source whitelist (5 sites to start)
+#
+# Each source provides RSS / sitemap URLs; full-article fetch goes through
+# services/news_search_service trusted-domain validation. The poll_minutes
+# field is consumed by the scheduler.
+#
+# Adding a source:
+#   - Must be a recognised international authority
+#   - Must expose a parseable RSS or sitemap.xml
+#   - tier in {official, reputable_media}
+#   - Validate: `python -m agents.official_ingestion_pipeline --once --source <name>`
+#     should pull at least 10 chunks
+
+sources:
+  - name: bbc
+    domain: bbc.com
+    tier: reputable_media
+    feeds:
+      - https://feeds.bbci.co.uk/news/world/rss.xml
+      - https://feeds.bbci.co.uk/news/health/rss.xml
+    poll_minutes: 360
+    enabled: true
+
+  - name: nyt
+    domain: nytimes.com
+    tier: reputable_media
+    feeds:
+      - https://rss.nytimes.com/services/xml/rss/nyt/World.xml
+      - https://rss.nytimes.com/services/xml/rss/nyt/Health.xml
+    poll_minutes: 360
+    enabled: true
+
+  # Reuters and AP shut down their public RSS feeds. We proxy through
+  # Google News RSS with a `site:` filter -- entries still link to the
+  # real reuters.com / apnews.com articles, so the trusted-domain
+  # validation in news_search_service still works.
+  - name: reuters
+    domain: reuters.com
+    tier: reputable_media
+    feeds:
+      - https://news.google.com/rss/search?q=site:reuters.com+when:1d&hl=en-US&gl=US&ceid=US:en
+    poll_minutes: 360
+    enabled: true
+
+  - name: ap
+    domain: apnews.com
+    tier: reputable_media
+    feeds:
+      - https://news.google.com/rss/search?q=site:apnews.com+when:1d&hl=en-US&gl=US&ceid=US:en
+    poll_minutes: 360
+    enabled: true
+
+  - name: xinhua
+    domain: xinhuanet.com
+    tier: reputable_media
+    feeds:
+      - http://www.xinhuanet.com/english/rss/worldrss.xml
+    poll_minutes: 720
+    enabled: true
+
+# Chunking
+chunking:
+  target_tokens: 800
+  overlap_tokens: 200
+  min_chunk_tokens: 100
+
+# Output
+output:
+  # Phase 1: write to data/official_chunks/{date}/{source}.jsonl to validate
+  #          cleaning quality.
+  # Phase 2: switch to direct Chroma 1 upsert.
+  base_dir: data/official_chunks

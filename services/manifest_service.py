@@ -1,13 +1,10 @@
 """
-ManifestService — produces and persists a RunManifest for each pipeline run.
+ManifestService - produces and persists a RunManifest for each pipeline run.
 
-Layout on disk:
+Layout on disk (v2):
     data/runs/{run_id}/
-        run_manifest.json
-        report.md              (written by ReportAgent)
-        report_raw.json        (written by ReportAgent)
-        metrics.json           (written by MetricsService)
-        counter_visuals/       (populated by VisualAgent when run_dir is set)
+        run_manifest.json      (this service)
+        run_manifest_v2.json   (PrecomputePipelineV2)
 """
 from __future__ import annotations
 
@@ -36,7 +33,6 @@ class ManifestService:
     def run_dir(self, run_id: str) -> Path:
         p = self.runs_root() / run_id
         p.mkdir(parents=True, exist_ok=True)
-        (p / "counter_visuals").mkdir(parents=True, exist_ok=True)
         return p
 
     def new_run(
@@ -56,8 +52,12 @@ class ManifestService:
             started, query_text, subreddits, reddit_query, channel, jsonl_path
         )
         thresholds = {
-            "claim_embed_sim_high": config.CLAIM_EMBED_SIM_HIGH,
-            "claim_embed_sim_low": config.CLAIM_EMBED_SIM_LOW,
+            "nl2sql_conflict_sim_low": getattr(
+                config, "NL2SQL_CONFLICT_SIM_LOW", 0.92,
+            ),
+            "nl2sql_conflict_sim_high": getattr(
+                config, "NL2SQL_CONFLICT_SIM_HIGH", 0.95,
+            ),
         }
         manifest = RunManifest(
             run_id=run_id,

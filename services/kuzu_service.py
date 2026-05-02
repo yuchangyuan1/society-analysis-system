@@ -53,6 +53,12 @@ class KuzuService:
             "CREATE NODE TABLE IF NOT EXISTS Entity(id STRING, name STRING, entity_type STRING, PRIMARY KEY(id))",
             "CREATE REL TABLE IF NOT EXISTS Mentions(FROM Claim TO Entity)",
             "CREATE REL TABLE IF NOT EXISTS CoOccursWith(FROM Entity TO Entity)",
+            # redesign-2026-05 Phase 2.6: v2 relations on the existing
+            # Account/Post/Topic/Entity nodes. Account doubles as the v2
+            # User node. New rels:
+            "CREATE REL TABLE IF NOT EXISTS Replied(FROM Post TO Post)",
+            "CREATE REL TABLE IF NOT EXISTS Liked(FROM Account TO Post)",
+            "CREATE REL TABLE IF NOT EXISTS HasEntity(FROM Post TO Entity)",
         ]
         for stmt in stmts:
             try:
@@ -180,6 +186,54 @@ class KuzuService:
             "MERGE (a)-[:SameAs]->(b)",
             {"a": claim_id_a, "b": claim_id_b},
         )
+
+    # ── redesign-2026-05 Phase 2.6: v2 post-level relations ─────────────────
+
+    def add_replied(self, child_post_id: str, parent_post_id: str) -> None:
+        """Reply edge: child_post -> parent_post."""
+        self._safe_execute(
+            "MATCH (c:Post {id: $cid}), (p:Post {id: $pid}) "
+            "MERGE (c)-[:Replied]->(p)",
+            {"cid": child_post_id, "pid": parent_post_id},
+        )
+
+    def add_liked(self, account_id: str, post_id: str) -> None:
+        self._safe_execute(
+            "MATCH (a:Account {id: $aid}), (p:Post {id: $pid}) "
+            "MERGE (a)-[:Liked]->(p)",
+            {"aid": account_id, "pid": post_id},
+        )
+
+    def add_post_has_entity(self, post_id: str, entity_id: str) -> None:
+        """Post -> Entity (v2 replacement for v1's Claim-only Mentions)."""
+        self._safe_execute(
+            "MATCH (p:Post {id: $pid}), (e:Entity {id: $eid}) "
+            "MERGE (p)-[:HasEntity]->(e)",
+            {"pid": post_id, "eid": entity_id},
+        )
+
+    def get_topic_propagation(self, topic_id: str) -> list[dict]:
+        """Posts in a topic with their authors and reply chains.
+        Used by Phase 3 KG Query branch (`tools/graph_tools.py`).
+        """
+        result = self._safe_execute(
+            "MATCH (a:Account)-[:Posted]->(p:Post)-[:BelongsToTopic]->(t:Topic {id: $tid}) "
+            "RETURN a.id AS account_id, a.username AS username, "
+            "p.id AS post_id, p.text AS text",
+            {"tid": topic_id},
+        )
+        return result or []
+
+    def get_topic_entities(self, topic_id: str) -> list[dict]:
+        """Entities mentioned by posts in a topic."""
+        result = self._safe_execute(
+            "MATCH (p:Post)-[:BelongsToTopic]->(t:Topic {id: $tid}), "
+            "(p)-[:HasEntity]->(e:Entity) "
+            "RETURN DISTINCT e.id AS entity_id, e.name AS name, "
+            "e.entity_type AS entity_type",
+            {"tid": topic_id},
+        )
+        return result or []
 
     def add_related_to(self, claim_id_a: str, claim_id_b: str) -> None:
         self._safe_execute(

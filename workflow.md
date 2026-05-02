@@ -1,6 +1,6 @@
 # 项目工作流程与架构
 
-> **状态**：v2 主干交付完毕（5 个 Phase）
+> **状态**：v2 主干交付完毕（5 个 Phase + Phase 6 context 优化）
 > **日期**：2026-05-02
 > **依据**：当前代码 + 三库（Postgres / Kuzu / Chroma×3）实际接线
 
@@ -159,9 +159,19 @@ load session JSON
           numeric_mismatch    → Chroma 3 `kind=composition_error`
       → 同时写 PG `reflection_log` 审计表
   → save session + return ChatResponse
+      ⤷ session_store.save() 内部：
+          conversation_compactor.maybe_compact(state)
+          - 若 len(conversation) > SESSION_MAX_TURNS (默认 40)
+            把最老的 ≥ MIN_TURNS_TO_COMPACT (默认 10) 轮喂给 LLM 压缩
+          - state.summary 滚动更新（≤ 1200 字符）
+          - state.archived_count / summary_until_turn 计数
+          - LLM 失败 → 仍截断（path A），不阻塞写盘
 ```
 
-LLM 调用预算：每次 chat 最多 3 次（rewriter + writer + critic），期望延迟 5-8s。
+LLM 调用预算：
+- 每次 chat 主流程最多 3 次（rewriter + writer + critic）
+- 摊销开销：每 10 轮 1 次 conversation_compactor 调用（≈ $0.0001/turn）
+- 期望延迟 5-8s（compactor 不在主路径，是 save 阶段的旁路）
 
 ### 2.1 多分支默认路由
 
@@ -209,7 +219,28 @@ Planner 把结果以 `topic_id_hints` 注入 NL2SQL，prompt 显式要求
 - `SET TRANSACTION READ ONLY`
 - 推荐配置 `POSTGRES_READONLY_DSN` 用专用只读账号
 
-### 2.4 错误归因层级
+### 2.4 上下文窗口管理（Phase 6, A + B）
+
+`SessionState.conversation` 不再无限增长：
+
+```
+conversation 长度 < SESSION_MAX_TURNS (40)         → 不动
+conversation 长度 ≥ SESSION_MAX_TURNS              → 触发压缩
+   - 取最老的 max(excess, MIN_TURNS_TO_COMPACT=10) 轮
+   - LLM 调用 (1 次, ~400 token output) 把它们 + 已有 state.summary 合并
+   - 写回 state.summary (≤ SESSION_SUMMARY_MAX_CHARS=1200)
+   - 从 conversation 里 pop 这些轮
+   - state.archived_count / summary_until_turn 计数推进
+```
+
+**Rewriter 怎么看到老内容**：
+- 窗口内的 3 条最近 assistant 回复仍由 `recent_assistants` 提供
+- 窗口外的内容由 `older_context_summary`（来自 `state.summary`）提供
+- 第 41 轮第一次触发，第 51 / 61 / ... 轮后续滚动 merge
+
+**失败模式**：LLM 不可达时退化为纯 trim（path A）—— summary 不更新但 session 文件仍封顶大小，不影响主对话流。
+
+### 2.5 错误归因层级
 
 | 层 | 触发位置 | 处理 | 是否进 Reflection |
 |---|---|---|---|
@@ -280,6 +311,7 @@ v2 关系：`Posted / Replied / Liked / BelongsToTopic / HasEntity`
 | `agents/report_writer.py::ReportWriter` | 三源综合 → markdown + citation |
 | `agents/quality_critic.py::QualityCritic` | 4 轴校验 |
 | `agents/ablation_runner.py::AblationRunner` | per-turn 因果验证 |
+| `agents/conversation_compactor.py::maybe_compact` | 滚动窗口 + LLM 压缩老对话（Phase 6） |
 | `agents/chat_orchestrator.py::ChatOrchestrator` | v2 主入口 |
 
 ### 4.2 Tools（atomic 操作）
@@ -380,8 +412,9 @@ PYTEST_RUN_LIVE_SCHEMA=1 pytest tests/test_schema_consistency.py::test_live_sche
 6. **Critic retry**：1 次 → 二次失败标 `needs_human_review=True`
 7. **Posts 不向量化**：用 topic_id JOIN（语义解析后）+ Kuzu entity 关联 + tsvector 兜底
 8. **Anchor 文档不衰减**：`kind=schema` / `kind=module_card` 永不被 decay scanner 删
-9. **每次 chat 最多 3 次 LLM**：rewriter + writer + critic（critic 可跳过）
+9. **每次 chat 主路径最多 3 次 LLM**：rewriter + writer + critic（critic 可跳过）；conversation_compactor 是 save 阶段的旁路调用，不计入主路径预算
 10. **多分支默认**：Planner 默认 fan-out 到 ≥2 个分支（除 community_count），让 ReportWriter 真正综合多源
+11. **Session 长度封顶**：`conversation` 永远不超过 `SESSION_MAX_TURNS`，老内容压缩进 `summary` 滚动保留
 
 ---
 
@@ -403,6 +436,9 @@ PYTEST_RUN_LIVE_SCHEMA=1 pytest tests/test_schema_consistency.py::test_live_sche
 | `MULTIMODAL_DAILY_BUDGET_USD` | 5.0 | 图像理解日预算 |
 | `MULTIMODAL_MIN_LIKES / MIN_REPLIES` | 50 / 20 | 图像理解采样阈值 |
 | `CHROMA_OFFICIAL/NL2SQL/PLANNER_COLLECTION` | chroma_official / nl2sql / planner | Collection 名 |
+| `SESSION_MAX_TURNS` | 40 | 单会话窗口大小（超过即压缩+截断） |
+| `SESSION_MIN_TURNS_TO_COMPACT` | 10 | LLM 压缩最低批量（小 overflow 也按这个量截）|
+| `SESSION_SUMMARY_MAX_CHARS` | 1200 | 滚动摘要长度上限 |
 
 ---
 

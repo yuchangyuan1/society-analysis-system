@@ -39,7 +39,20 @@ def load(session_id: str) -> SessionState:
 
 
 def save(state: SessionState) -> None:
-    """Write the session atomically (write temp + rename)."""
+    """Write the session atomically (write temp + rename).
+
+    Phase 6 (A + B): before serialising, run the compactor so the
+    persisted JSON never grows unbounded. Old turns are folded into
+    `state.summary` via one LLM call when the conversation crosses the
+    configured window.
+    """
+    try:
+        from agents.conversation_compactor import maybe_compact
+        maybe_compact(state)
+    except Exception:
+        # Compactor failures must never block session persistence.
+        pass
+
     p = _path(state.session_id)
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(

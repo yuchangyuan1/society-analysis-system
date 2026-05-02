@@ -79,6 +79,18 @@ NL2SQL_MAX_REPAIR_ROUNDS: int = int(os.getenv("NL2SQL_MAX_REPAIR_ROUNDS", "3"))
 NL2SQL_RESULT_ROW_LIMIT: int = int(os.getenv("NL2SQL_RESULT_ROW_LIMIT", "1000"))
 NL2SQL_STATEMENT_TIMEOUT_MS: int = int(os.getenv("NL2SQL_STATEMENT_TIMEOUT_MS", "5000"))
 
+# redesign-2026-05 Phase 6: session context window + rolling summary
+# Hard-trim conversation list once it exceeds SESSION_MAX_TURNS.
+SESSION_MAX_TURNS: int = int(os.getenv("SESSION_MAX_TURNS", "40"))
+# Below this, just drop without paying the LLM compactor (rare in practice).
+SESSION_MIN_TURNS_TO_COMPACT: int = int(
+    os.getenv("SESSION_MIN_TURNS_TO_COMPACT", "10")
+)
+# Cap the rolling summary length so it doesn't grow unbounded over weeks.
+SESSION_SUMMARY_MAX_CHARS: int = int(
+    os.getenv("SESSION_SUMMARY_MAX_CHARS", "1200")
+)
+
 # redesign-2026-05 Phase 5: experience decay
 # Records below this confidence are considered stale and decayed away.
 EXPERIENCE_MIN_CONFIDENCE: float = float(

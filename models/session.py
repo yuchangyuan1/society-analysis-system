@@ -29,6 +29,13 @@ class SessionState(BaseModel):
     so that follow-up questions can inherit context without the user
     having to re-specify. `recent_visuals` lets the UI show thumbnails
     of visuals the user generated earlier in the conversation.
+
+    Long conversations are managed by Phase 6 context optimisation:
+      - `conversation` is hard-trimmed to SESSION_MAX_TURNS (default 40).
+      - When trimming, the dropped turns are LLM-compressed into
+        `summary` so the Rewriter still sees pre-window context.
+      - `summary_until_turn` records up to which absolute turn index
+        `summary` covers, so we don't recompress the same turns twice.
     """
     session_id: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -37,3 +44,11 @@ class SessionState(BaseModel):
     current_claim_id: Optional[str] = None
     recent_visuals: list[str] = Field(default_factory=list)
     conversation: list[ConversationTurn] = Field(default_factory=list)
+    # Phase 6 (A + B):
+    summary: str = ""               # rolling LLM summary of pre-window turns
+    summary_until_turn: int = 0     # absolute turn index covered by summary
+    archived_count: int = 0         # number of turns dropped from conversation
+
+    def total_turns_seen(self) -> int:
+        """Absolute turn count, including ones already trimmed."""
+        return self.archived_count + len(self.conversation)

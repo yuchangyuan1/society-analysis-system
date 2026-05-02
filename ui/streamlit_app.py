@@ -18,8 +18,9 @@ st.set_page_config(
 
 st.title("Society Analysis — Research Console")
 st.caption(
-    "Start on the **Chat** page (sidebar) to ask questions conversationally, "
-    "or use the Run List / Run Detail pages for the raw artefact view."
+    "Start on the **Chat** page (sidebar) to ask questions across community "
+    "posts and authoritative sources, or open **Reflection** to inspect "
+    "the auto-curated experience stores."
 )
 
 try:
@@ -34,7 +35,7 @@ except Exception as exc:  # noqa: BLE001 — surface any network / parse error
 st.markdown(
     """
     ### Pages
-    - **Run List** — all runs under `data/runs/`, newest first.
-    - **Run Detail** — manifest, metrics, rendered report, and counter-message visuals for a single run.
+    - **Chat** — natural-language Q&A backed by Evidence / NL2SQL / KG branches.
+    - **Reflection** — operator view of Chroma 2 / Chroma 3 / reflection_log.
     """
 )

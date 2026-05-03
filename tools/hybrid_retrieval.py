@@ -35,12 +35,18 @@ from services.embeddings_service import EmbeddingsService
 log = structlog.get_logger(__name__)
 
 
-# ── BM25 helper (lazy import) ────────────────────────────────────────────────
+# ── BM25 helper (lazy import + LRU cache) ────────────────────────────────────
 
 def _bm25_score_subset(
     documents: list[dict], query: str, top_k: int,
 ) -> list[tuple[int, float]]:
     """Return [(corpus_index, score)] sorted desc, length up to top_k.
+
+    The BM25Okapi index is memoised by the corpus fingerprint
+    (sha256 of the sorted chunk ids), so repeated queries against the
+    same Chroma 1 candidate slice reuse the index. Cache invalidates
+    when `services.bm25_cache.bump_corpus_version()` is called (the
+    OfficialIngestionPipeline does this after upserting new chunks).
 
     Returns an empty list if rank_bm25 is unavailable.
     """
@@ -52,14 +58,21 @@ def _bm25_score_subset(
         return []
     if not documents:
         return []
-    corpus = [
-        (doc.get("document") or "").lower().split()
-        for doc in documents
-    ]
     query_tokens = (query or "").lower().split()
     if not query_tokens:
         return []
-    bm25 = BM25Okapi(corpus)
+
+    from services.bm25_cache import BM25_CACHE, fingerprint_corpus
+    chunk_ids = [doc.get("id") or "" for doc in documents]
+    fp = fingerprint_corpus(chunk_ids)
+    bm25 = BM25_CACHE.get(fp)
+    if bm25 is None:
+        corpus = [
+            (doc.get("document") or "").lower().split()
+            for doc in documents
+        ]
+        bm25 = BM25Okapi(corpus)
+        BM25_CACHE.put(fp, bm25)
     scores = bm25.get_scores(query_tokens)
     indexed = list(enumerate(scores))
     indexed.sort(key=lambda x: x[1], reverse=True)

@@ -361,13 +361,13 @@ def test_persist_v2_writes_replied_edges_when_parent_post_id_present(
     )
     pipeline.run(run_dir=tmp_path / "kg-run", jsonl_path="any.jsonl")
 
-    # Each child should have triggered an upsert_post(parent, "") + add_replied
-    add_replied_calls = kuzu.add_replied.call_args_list
-    edge_pairs = {(call.args[0], call.args[1])
-                  for call in add_replied_calls}
+    # Day 6: persist_v2 batches Replied edges via bulk_add_replied(rows).
+    bulk_calls = kuzu.bulk_add_replied.call_args_list
+    assert bulk_calls, "bulk_add_replied should have been called"
+    rows = bulk_calls[0].args[0]
+    edge_pairs = {(child, parent) for child, parent in rows}
     assert ("c1", "root") in edge_pairs
     assert ("c2", "root") in edge_pairs
-    # Root has no parent_post_id; no spurious Replied edge should originate from it.
     assert all(child != "root" for child, _ in edge_pairs)
 
 
@@ -429,3 +429,48 @@ def test_pipeline_v2_runs_with_jsonl_fixture(tmp_path: Path, monkeypatch):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["schema_version"] == "v2"
     assert manifest["post_count"] == 2
+
+
+def test_pipeline_v2_passes_reddit_fetch_controls(tmp_path: Path):
+    """Reddit smoke runs can cap submissions and skip comment fetches."""
+    from agents.precompute_pipeline_v2 import PrecomputePipelineV2
+
+    ingestion = MagicMock()
+    ingestion.ingest_subreddit.return_value = []
+    ingestion.ingest_multi_subreddit.return_value = []
+    knowledge = MagicMock()
+    knowledge.classify_post_emotions = MagicMock()
+
+    pipeline = PrecomputePipelineV2(ingestion=ingestion, knowledge=knowledge)
+
+    pipeline.run(
+        run_dir=tmp_path / "single",
+        subreddits=["worldnews"],
+        reddit_days_back=1,
+        reddit_limit_per_sub=10,
+        reddit_include_comments=False,
+        reddit_comment_limit=100,
+    )
+    ingestion.ingest_subreddit.assert_called_once_with(
+        "worldnews",
+        days_back=1,
+        limit=10,
+        include_comments=False,
+        comment_limit=100,
+    )
+
+    pipeline.run(
+        run_dir=tmp_path / "multi",
+        subreddits=["worldnews", "news"],
+        reddit_days_back=1,
+        reddit_limit_per_sub=5,
+        reddit_include_comments=False,
+        reddit_comment_limit=100,
+    )
+    ingestion.ingest_multi_subreddit.assert_called_once_with(
+        subreddits=["worldnews", "news"],
+        days_back=1,
+        limit_per_sub=5,
+        include_comments=False,
+        comment_limit=100,
+    )

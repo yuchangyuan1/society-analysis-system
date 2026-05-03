@@ -1,8 +1,13 @@
 # Society Analysis 项目改造方案 v2
 
-> **状态**：✅ 全部 5 个 Phase 已交付（93 passed, 1 skipped）
-> **日期**：2026-05-01
-> **交付总览**：见 `docs/phase{1,2,3,4,5}_done.md`
+> **状态**：✅ 全部 5 个原始 Phase 交付，并完成 KG 改造 4 阶段（Phase A→D）+ 8 天生产化
+> **日期**：2026-05-03
+> **当前测试**：142 passed / 1 skipped
+> **后续文档**：
+>   - `docs/kg_redesign_plan.md` — KG 模块改造方案（Phase A→D 已全部落地）
+>   - `docs/review.md` — 生产化前 8 类问题清单 + 拍板记录（除 #3/#6/#7 外全部完成）
+>   - `workflow.md` — 当前架构与模块清单
+>   - `README.md` — 上手 + 运维命令
 > **依据**：`ChatGPT Image 2026年5月1日 11_34_49.png` 流程图
 > **替代**：当前 `complete_project_transformation_plan.md` 中尚未落地的部分
 
@@ -313,7 +318,7 @@
 - **冲突处理**：同一类错误若被反复回写，做去重 + 频次累计，避免 Chroma 经验库被同质化记录灌爆
 
 **交付物**：
-- Reflection 表 + 看板（Streamlit 页面 `ui/pages/3_Reflection.py`），含三个 Tab：Chroma 2 内容 / Chroma 3 内容 / 待审核错误队列
+- Reflection 表 + API inspector（`/reflection/*`）。课堂展示 UI 已收敛到单页 `ui/streamlit_app.py`，不再保留独立 Reflection 页面。
 
 ---
 
@@ -343,7 +348,7 @@
 - `services/nl2sql_memory.py`
 - `services/reflection_store.py`
 - `db/schema_v2.sql`
-- `ui/pages/3_Reflection.py`
+- `ui/streamlit_app.py`（单页 Chat + 数据源控制 + 导入按钮 + 路由模块/KG 可视化展示）
 - `scripts/rebuild_chroma2_schema.py`（Schema 双写重建命令）
 - `tests/test_schema_consistency.py`（PG ↔ Chroma 2 三项一致性测试）
 
@@ -359,10 +364,10 @@
 - `services/chroma_service.py`（仅扩 collection，不改实现）
 - `services/embeddings_service.py`
 - `services/wikipedia_service.py` / `services/news_search_service.py`（移到官方源采集臂内部使用）
-- `services/reddit_service.py` / `services/telegram_service.py`
+- `services/reddit_service.py`
 - `models/session.py` / `models/chat.py`
 - `api/routes/chat.py` / `api/routes/runs.py`（部分签名调整）
-- `ui/pages/0_Chat.py` 主体（右栏 Tab 改名）
+- `ui/streamlit_app.py` 主体（单页 Chat 展示三路路由、KG 图谱和数据源控制）
 
 ---
 
@@ -413,7 +418,7 @@
 
 **Post 去重方案**（我替你拍板：**simhash 主 + pg_trgm 兜底**）：
 - 入库时计算 64-bit `simhash`，写到 PG `posts.simhash bigint` 列 + GIN 索引
-- Hamming distance ≤ 3 视为重复（推荐工业值；Twitter / Reddit 都用类似阈值）
+- Hamming distance ≤ 3 视为重复（推荐工业值；Reddit 使用类似阈值）
 - 长帖子（> 500 token）用 pg_trgm `similarity()` 做二次确认（simhash 对长文本退化）
 - **不用 embedding**：理由 1）入库吞吐重要，simhash 比 embedding 快 100×；2）embedding 已经在 topic 聚类阶段算过了，不用为去重再算一次；3）项目已决定 posts 不向量化
 - **不用 pg_trgm 做主路径**：长文本 trigram 匹配会爆索引

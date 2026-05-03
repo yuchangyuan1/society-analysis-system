@@ -1,7 +1,7 @@
 # Society Analysis
 
-A real-time multi-source retrieval system over social-media discussions and
-authoritative news. Users ask questions in natural language; the system fans
+A real-time retrieval system over **Reddit discussions** and
+**official / evidence sources**. Users ask questions in natural language; the system fans
 the request out to **three retrieval branches in parallel** —
 
 - **Evidence Retrieval** — hybrid (Dense + BM25 + RRF + Rerank) over
@@ -37,12 +37,32 @@ memory or prompt size.
 
 The system runs three branches concurrently when the question benefits from
 cross-source synthesis, then a Report Writer assembles a markdown answer
-with inline citations like `[chunk_id]` that resolve to the actual BBC/NYT
-URL. A Quality Critic checks every numerical claim against the SQL/KG row
+with citations built from source metadata, including title, outlet/domain,
+URL, and publication date when available. A Quality Critic checks every numerical claim against the SQL/KG row
 it cites; if the LLM hallucinates a number, the response is flagged
 `needs_human_review=True`.
 
 ---
+
+## Knowledge Graph branch (Phase A→D + production hardening)
+
+The KG branch isn't a SQL view in disguise — it owns five capabilities
+that PG can't express:
+
+| Query | Backed by | Use case |
+|---|---|---|
+| `propagation_path` | Kuzu Cypher (Replied chain, both directions) | "trace how this rumour spread between alice and dave" |
+| `cascade_tree` | Kuzu Cypher (recursive descendants) | "show me the entire reply tree under this post" |
+| `viral_cascade` | Kuzu + ranking | "longest / most-amplified cascades in topic T" |
+| `influencer_rank` | NetworkX PageRank | "who's actually influential" (not just post count) |
+| `bridge_accounts` | NetworkX betweenness | "who connects two opposing communities" |
+| `coordinated_groups` | NetworkX Louvain | "is this organised posting" |
+| `echo_chamber` | Modularity threshold | "is topic T a closed bubble" |
+
+The Planner auto-routes 5 SubtaskIntents (`propagation_trace`,
+`influencer_query`, `coordination_check`, `community_structure`,
+`cascade_query`) to the right method. Subgraph extraction is LRU-cached;
+freshness defaults to 30 days for trending / propagation queries.
 
 ## Quick start
 
@@ -91,6 +111,10 @@ MULTIMODAL_DAILY_BUDGET_USD=5.0
 python -c "import psycopg2, config; \
   c = psycopg2.connect(config.POSTGRES_DSN); c.autocommit=True; \
   c.cursor().execute(open('db/schema_v2.sql').read())"
+
+# If you're upgrading an existing PG that predates the lineage columns,
+# run the idempotent migration once:
+python -m scripts.migrate_run_lineage
 ```
 
 ### 4. Cold-start the planner memory (Chroma 3)
@@ -133,28 +157,37 @@ uvicorn api.app:app --reload --port 8000
 streamlit run ui/streamlit_app.py
 ```
 
-Open <http://localhost:8501>. The Chat page is the default landing.
+Open <http://localhost:8501>. The app is now a single-page Chat interface.
+The sidebar lets you choose Reddit subreddits, official/evidence sources,
+date ranges, and append/overwrite import mode.
 
 ---
 
 ## Try it from the UI
 
-Sample questions to see different branch combinations:
+The sidebar contains editable suggested-question templates. They are written
+without concrete topic names so you can fill in the topic or claim you want
+to demonstrate.
 
-| Question | Branches expected |
-|---|---|
-| `What topics are trending and who's amplifying them?` | nl2sql + kg |
-| `What were users discussing about misinformation?` | nl2sql + kg (semantic topic resolution) |
-| `What did BBC say about the troop reduction?` | evidence |
-| `Is the claim 'vaccines reduce hospitalisation by 90%' backed by official sources?` | evidence + nl2sql |
-| `Compare the official line on Cuba with community sentiment.` | evidence + nl2sql + kg |
-| `Top 3 most-liked posts and their authors` | nl2sql |
-| `Who is most active in the most-discussed topic?` | nl2sql + kg |
+Examples:
 
-The "Structured output" panel under each answer shows which branches ran,
-what SQL was generated, what KG nodes were touched, and which evidence
-chunks were cited. The right-side tabs (Evidence / Topic / Graph /
-Metrics / Visual) populate based on which branches answered.
+- `List the main topics in the selected Reddit data, and summarize discussion volume, dominant emotion, and notable shifts.`
+- `For the topic about <your topic>, summarize the dominant emotions, representative posts, and how sentiment differs across discussion clusters.`
+- `For the topic about <your topic>, trace propagation paths or reply chains and explain what the Knowledge Graph shows.`
+- `For the topic about <your topic>, identify key amplifying accounts and explain the graph evidence behind the ranking.`
+- `For the topic about <your topic>, list Reddit claims and classify which are consistent with official/evidence sources, which contradict them, and which lack enough evidence. Include author, verdict, the official/evidence statement, and citation.`
+- `Fact-check this Reddit claim using the selected official/evidence sources: <paste claim here>.`
+
+Each answer keeps the report readable by default, then shows:
+
+- source citations when evidence was used;
+- route-module cards for **RAG**, **Knowledge Graph**, and **NL2SQL**;
+- a Knowledge Graph visualization when the KG branch returns nodes/edges;
+- raw branch JSON only when **Show raw technical output** is enabled.
+
+The sidebar import controls call the backend import API. `Append` adds new
+pipeline output. `Overwrite` requires an explicit confirmation checkbox and
+deletes retained data for the selected source scope before importing.
 
 ---
 
@@ -181,6 +214,19 @@ curl -X POST http://127.0.0.1:8000/chat/query \
 
 # Inspect a session:
 curl http://127.0.0.1:8000/chat/session/demo
+
+# Manual Reddit import (background job):
+curl -X POST http://127.0.0.1:8000/admin/import/reddit \
+  -H 'Content-Type: application/json' \
+  -d '{"subreddits":["worldnews"],"start_date":"2026-05-02","end_date":"2026-05-03","mode":"append","limit_per_subreddit":100,"comment_limit":100,"include_comments":true}'
+
+# Manual official/evidence import (background job):
+curl -X POST http://127.0.0.1:8000/admin/import/official \
+  -H 'Content-Type: application/json' \
+  -d '{"sources":["ap","reuters","bbc","nyt"],"start_date":"2026-05-02","end_date":"2026-05-03","mode":"append","write_chroma":true}'
+
+# Check import job status:
+curl http://127.0.0.1:8000/admin/import/jobs/import_xxxxxxxxxxxx
 
 # Reflection inspector:
 curl 'http://127.0.0.1:8000/reflection/chroma2?kind=success&limit=20'
@@ -231,11 +277,22 @@ python -m scripts.decay_chroma_experience
 python -m agents.official_ingestion_pipeline --once
 
 # Replay previously-written jsonl into Chroma 1 (after a server outage):
-python -m agents.official_ingestion_pipeline --replay --date 2026-05-02
+python -m agents.official_ingestion_pipeline --replay --date 2026-05-03
 
 # Rebuild Chroma 2 schema part if PG ↔ Chroma drift detected:
 python -m scripts.rebuild_chroma2_schema --dry-run
 python -m scripts.rebuild_chroma2_schema           # applies the rebuild
+
+# Run lifecycle (production hardening Day 4):
+python -m scripts.data_admin scan-pending          # find half-finished runs
+python -m scripts.data_admin rollback RUN_ID       # delete one run cleanly
+python -m scripts.data_admin rollback-all-pending  # crash-recovery sweep
+python -m scripts.data_admin show RUN_ID           # print one manifest
+
+# Long-running scheduler (single command bootstraps + then daily cron):
+python -m scripts.scheduler                         # daemon
+python -m scripts.scheduler --bootstrap             # bootstrap only
+python -m scripts.scheduler --once --task official_sources
 ```
 
 ---
@@ -281,8 +338,8 @@ agents/                # Pipeline + chat agents (see workflow.md §4.1)
 tools/                 # Atomic operations (hybrid_retrieval / nl2sql / kg / topic_resolver)
 services/              # Storage + third-party wrappers
 models/                # Pydantic data contracts
-api/                   # FastAPI routes (chat, retrieve, reflection, runs, artifacts)
-ui/                    # Streamlit pages
+api/                   # FastAPI routes (chat, retrieve, import, reflection, runs, artifacts)
+ui/                    # Single-page Streamlit Chat UI
 db/                    # schema_v2.sql
 config/                # YAML configs (official_sources.yaml)
 scripts/               # CLI utilities (seed, decay, rebuild)

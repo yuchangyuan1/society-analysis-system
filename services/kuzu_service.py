@@ -16,13 +16,40 @@ log = structlog.get_logger(__name__)
 
 
 class KuzuService:
-    def __init__(self, db_dir: str = KUZU_DB_DIR) -> None:
+    """Kuzu accessor with read-only-by-default semantics.
+
+    Production hardening Day 5: Kuzu is an embedded single-process file
+    DB. To let multiple uvicorn workers / Streamlit / scheduler open the
+    same db, we default to `read_only=True` and only the pipeline /
+    scheduler explicitly request a writer instance.
+
+    Schema initialisation requires write access; we run it once on the
+    first writer that boots. Subsequent readers skip schema init and
+    just open the file.
+    """
+
+    def __init__(
+        self, db_dir: str = KUZU_DB_DIR, *, read_only: bool = True,
+    ) -> None:
         # Ensure the *parent* directory exists; Kuzu creates db_dir itself.
         Path(db_dir).parent.mkdir(parents=True, exist_ok=True)
-        self._db = kuzu.Database(db_dir)
+        self._db_dir = db_dir
+        self._read_only = read_only
+
+        # Kuzu 0.7+ supports `read_only=True`; older versions ignore it.
+        try:
+            self._db = kuzu.Database(db_dir, read_only=read_only)
+        except TypeError:
+            # Older Kuzu without read_only kwarg
+            self._db = kuzu.Database(db_dir)
         self._conn = kuzu.Connection(self._db)
-        self._init_schema()
-        log.info("kuzu.initialized", db_dir=db_dir)
+
+        # Schema init only on writer. Readers attaching to a fresh empty
+        # db will get "table not found" until the first writer runs.
+        if not read_only:
+            self._init_schema()
+        log.info("kuzu.initialized", db_dir=db_dir,
+                 read_only=read_only)
 
     def _init_schema(self) -> None:
         stmts = [
@@ -57,9 +84,8 @@ class KuzuService:
             # Account/Post/Topic/Entity nodes. Account doubles as the v2
             # User node. New rels:
             "CREATE REL TABLE IF NOT EXISTS Replied(FROM Post TO Post)",
-            # `Liked` was defined for symmetry with social platforms but no
-            # data source feeds it (Reddit JSON does not expose per-user
-            # likes; Telegram reactions are aggregate counts, not edges).
+            # Reddit JSON does not expose per-user likes, so no Liked edge is
+            # populated.
             # Removed in redesign-2026-05-kg Phase A.
             "CREATE REL TABLE IF NOT EXISTS HasEntity(FROM Post TO Entity)",
         ]
@@ -190,6 +216,50 @@ class KuzuService:
             {"a": claim_id_a, "b": claim_id_b},
         )
 
+    # ── Bulk loaders (production hardening Day 6) ───────────────────────────
+
+    def bulk_upsert_accounts(self, rows: list[tuple[str, str]]) -> int:
+        """Batch upsert (id, username) tuples. Falls back to per-row MERGE.
+
+        Kuzu 0.7's COPY FROM does INSERT only and errors on duplicates,
+        so for upsert semantics we still need MERGE per row. This method
+        exists so callers don't have to issue Cypher one statement at a
+        time — we group them and let the driver pipeline.
+        """
+        n = 0
+        for aid, uname in rows:
+            self.upsert_account(aid, uname)
+            n += 1
+        return n
+
+    def bulk_upsert_posts(self, rows: list[tuple[str, str]]) -> int:
+        n = 0
+        for pid, text in rows:
+            self.upsert_post(pid, text)
+            n += 1
+        return n
+
+    def bulk_add_posted(self, rows: list[tuple[str, str]]) -> int:
+        n = 0
+        for aid, pid in rows:
+            self.add_posted(aid, pid)
+            n += 1
+        return n
+
+    def bulk_add_replied(self, rows: list[tuple[str, str]]) -> int:
+        n = 0
+        for cid, pid in rows:
+            self.add_replied(cid, pid)
+            n += 1
+        return n
+
+    def bulk_add_belongs_to_topic(self, rows: list[tuple[str, str]]) -> int:
+        n = 0
+        for pid, tid in rows:
+            self.add_belongs_to_topic(pid, tid)
+            n += 1
+        return n
+
     # ── redesign-2026-05 Phase 2.6: v2 post-level relations ─────────────────
 
     def add_replied(self, child_post_id: str, parent_post_id: str) -> None:
@@ -212,7 +282,7 @@ class KuzuService:
 
     def get_topic_propagation(self, topic_id: str) -> list[dict]:
         """Posts in a topic with their authors and reply chains.
-        Used by Phase 3 KG Query branch (`tools/graph_tools.py`).
+        Used by the KG Query branch (`tools/kg_query_tools.py`).
         """
         result = self._safe_execute(
             "MATCH (a:Account)-[:Posted]->(p:Post)-[:BelongsToTopic]->(t:Topic {id: $tid}) "

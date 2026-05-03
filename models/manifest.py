@@ -22,7 +22,6 @@ class RunManifest(BaseModel):
     subreddits: list[str] = Field(default_factory=list)
     reddit_query: Optional[str] = None
     reddit_sort: Optional[str] = None
-    channel: Optional[str] = None
     jsonl_path: Optional[str] = None
     image_url: Optional[str] = None
     image_path: Optional[str] = None
@@ -31,3 +30,8 @@ class RunManifest(BaseModel):
     posts_snapshot_sha256: Optional[str] = None
     post_count: int = 0
     report_id: Optional[str] = None
+    # production hardening Day 4: commit state for crash-safe rollback.
+    #   pending   = ManifestService.new_run() set this; pipeline still running
+    #   committed = ManifestService.finalize() set this when all stages OK
+    #   failed    = ManifestService.mark_failed() set this on exception
+    commit_state: str = "pending"

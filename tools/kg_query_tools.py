@@ -262,18 +262,32 @@ class KGQueryTool:
         # Collect every (child, parent) pair that descends from the root
         # via any number of Replied hops up to max_depth. Reply edges go
         # child -> parent, so we follow them in reverse from the root.
-        cypher = (
-            "MATCH (root:Post {id: $rid}) "
-            "OPTIONAL MATCH (root)<-[:Replied*1.." + str(max_depth) + "]-(child:Post) "
-            "WITH root, collect(DISTINCT child) AS descendants "
-            "WITH root, [root] + descendants AS all_posts "
-            "UNWIND all_posts AS p "
+        #
+        # Kuzu cannot reuse an UNWINDed node value as a node pattern, so keep
+        # the root row and descendant rows as separate simple MATCH queries.
+        root_rows = self.kuzu._safe_execute(  # type: ignore[attr-defined]
+            "MATCH (a:Account)-[:Posted]->(root:Post {id: $rid}) "
+            "RETURN root.id AS post_id, '' AS parent_id, a.id AS account_id",
+            {"rid": root_post_id},
+        ) or []
+        if not root_rows:
+            root_rows = self.kuzu._safe_execute(  # type: ignore[attr-defined]
+                "MATCH (root:Post {id: $rid}) "
+                "RETURN root.id AS post_id, '' AS parent_id, '' AS account_id",
+                {"rid": root_post_id},
+            ) or []
+        desc_cypher = (
+            "MATCH (root:Post {id: $rid})"
+            "<-[:Replied*1.." + str(max_depth) + "]-(p:Post) "
             "OPTIONAL MATCH (p)-[:Replied]->(parent:Post) "
             "OPTIONAL MATCH (a:Account)-[:Posted]->(p) "
             "RETURN p.id AS post_id, parent.id AS parent_id, "
             "       a.id AS account_id"
         )
-        rows = self.kuzu._safe_execute(cypher, {"rid": root_post_id}) or []  # type: ignore[attr-defined]
+        desc_rows = self.kuzu._safe_execute(  # type: ignore[attr-defined]
+            desc_cypher, {"rid": root_post_id},
+        ) or []
+        rows = list(root_rows) + list(desc_rows)
 
         post_authors: dict[str, Optional[str]] = {}
         for r in rows:
@@ -364,5 +378,68 @@ class KGQueryTool:
         out.metrics["max_cascade_size"] = max(
             (int(r.get("cascade_size", 0)) for r in rows), default=0,
         )
+        out.elapsed_ms = int((time.monotonic() - t0) * 1000)
+        return out
+
+    def topic_reply_chains(
+        self, topic_id: str, top_k: int = 5, max_depth: int = 5,
+    ) -> KGOutput:
+        """Return concrete reply-chain nodes/edges for top cascades in a topic.
+
+        `viral_cascade` ranks candidate root posts. This method expands those
+        roots into actual Post nodes plus Replied edges so report writing can
+        show chain excerpts instead of only cascade scores.
+        """
+        t0 = time.monotonic()
+        out = KGOutput(
+            query_kind="reply_chains",
+            target={"topic_id": topic_id, "top_k": top_k,
+                    "max_depth": max_depth},
+        )
+        if not topic_id:
+            out.target["reason"] = "missing topic_id"
+            return out
+
+        ranked = self.viral_cascade(topic_id=topic_id, top_k=top_k)
+        if not ranked.nodes:
+            out.metrics = {"cascade_count": 0}
+            out.elapsed_ms = int((time.monotonic() - t0) * 1000)
+            return out
+
+        seen_nodes: set[str] = set()
+        seen_edges: set[tuple[str, str, str]] = set()
+        for idx, root in enumerate(ranked.nodes, start=1):
+            tree = self.cascade_tree(root.id, max_depth=max_depth)
+            cascade_size = root.properties.get("cascade_size", 0)
+            unique_authors = root.properties.get("unique_authors", 0)
+            for node in tree.nodes:
+                if node.id in seen_nodes:
+                    continue
+                props = dict(node.properties)
+                props.update({
+                    "root_post_id": root.id,
+                    "chain_rank": idx,
+                    "root_cascade_size": cascade_size,
+                    "root_unique_authors": unique_authors,
+                })
+                out.nodes.append(KGNode(
+                    id=node.id,
+                    label=node.label,
+                    properties=props,
+                ))
+                seen_nodes.add(node.id)
+            for edge in tree.edges:
+                key = (edge.source_id, edge.target_id, edge.rel_type)
+                if key in seen_edges:
+                    continue
+                out.edges.append(edge)
+                seen_edges.add(key)
+
+        out.metrics = {
+            "cascade_count": len(ranked.nodes),
+            "node_count": len(out.nodes),
+            "edge_count": len(out.edges),
+            "max_cascade_size": ranked.metrics.get("max_cascade_size", 0),
+        }
         out.elapsed_ms = int((time.monotonic() - t0) * 1000)
         return out

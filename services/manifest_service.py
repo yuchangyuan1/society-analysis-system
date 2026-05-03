@@ -41,7 +41,6 @@ class ManifestService:
         subreddits: Optional[list[str]] = None,
         reddit_query: Optional[str] = None,
         reddit_sort: Optional[str] = None,
-        channel: Optional[str] = None,
         jsonl_path: Optional[str] = None,
         image_url: Optional[str] = None,
         image_path: Optional[str] = None,
@@ -49,7 +48,7 @@ class ManifestService:
     ) -> RunManifest:
         started = datetime.utcnow()
         run_id = self._build_run_id(
-            started, query_text, subreddits, reddit_query, channel, jsonl_path
+            started, query_text, subreddits, reddit_query, jsonl_path
         )
         thresholds = {
             "nl2sql_conflict_sim_low": getattr(
@@ -68,15 +67,16 @@ class ManifestService:
             subreddits=list(subreddits or []),
             reddit_query=reddit_query,
             reddit_sort=reddit_sort,
-            channel=channel,
             jsonl_path=jsonl_path,
             image_url=image_url,
             image_path=image_path,
             days_back=days_back,
             thresholds=thresholds,
+            commit_state="pending",
         )
-        # Create directory so downstream writers can rely on it
+        # Create directory + pending sentinel so the rollback scanner sees us.
         self.run_dir(run_id)
+        self._write(manifest)
         log.info("manifest.new_run", run_id=run_id, query=(query_text or "")[:60])
         return manifest
 
@@ -91,12 +91,46 @@ class ManifestService:
         manifest.posts_snapshot_sha256 = posts_snapshot_sha256
         manifest.post_count = post_count
         manifest.report_id = report_id
+        manifest.commit_state = "committed"
+        path = self._write(manifest)
+        log.info("manifest.finalized", run_id=manifest.run_id, path=str(path))
+        return path
 
+    def mark_failed(self, manifest: RunManifest, error: str = "") -> Path:
+        """Set commit_state=failed; lets the rollback scanner pick it up."""
+        manifest.finished_at = datetime.utcnow()
+        manifest.commit_state = "failed"
+        path = self._write(manifest)
+        log.warning("manifest.failed", run_id=manifest.run_id,
+                    error=error[:200])
+        return path
+
+    def list_pending_runs(self) -> list[RunManifest]:
+        """Scan runs/ for any run still in commit_state='pending' or 'failed'.
+        Used by scripts/data_admin scan-pending and pipeline startup sweeps."""
+        out: list[RunManifest] = []
+        if not self.runs_root().exists():
+            return out
+        for d in self.runs_root().iterdir():
+            if not d.is_dir():
+                continue
+            mf = d / "run_manifest.json"
+            if not mf.exists():
+                continue
+            try:
+                m = RunManifest.model_validate_json(mf.read_text(encoding="utf-8"))
+                if m.commit_state in ("pending", "failed"):
+                    out.append(m)
+            except Exception as exc:
+                log.warning("manifest.list_pending_parse_error",
+                            path=str(mf), error=str(exc)[:120])
+        return out
+
+    def _write(self, manifest: RunManifest) -> Path:
         path = self.run_dir(manifest.run_id) / "run_manifest.json"
         path.write_text(
-            manifest.model_dump_json(indent=2), encoding="utf-8"
+            manifest.model_dump_json(indent=2), encoding="utf-8",
         )
-        log.info("manifest.finalized", run_id=manifest.run_id, path=str(path))
         return path
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -107,7 +141,6 @@ class ManifestService:
         query_text: Optional[str],
         subreddits: Optional[list[str]],
         reddit_query: Optional[str],
-        channel: Optional[str],
         jsonl_path: Optional[str],
     ) -> str:
         ts = started.strftime("%Y%m%d-%H%M%S")
@@ -115,7 +148,6 @@ class ManifestService:
             query_text or "",
             ",".join(sorted(subreddits or [])),
             reddit_query or "",
-            channel or "",
             jsonl_path or "",
         ])
         short = hashlib.sha256(key.encode("utf-8")).hexdigest()[:6]

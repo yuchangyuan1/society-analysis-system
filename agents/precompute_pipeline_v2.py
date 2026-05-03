@@ -2,7 +2,7 @@
 Precompute Pipeline v2 - redesign-2026-05.
 
 Phase 1 backbone (5 stages):
-    1. fetch_posts        - Fetch posts (Reddit / Telegram / fixture)
+    1. fetch_posts        - Fetch posts (Reddit / fixture)
     2. ingest             - Multimodal + entity enrichment + dedup
     3. normalize          - Field normalisation
     4. emotion_baseline   - Per-post baseline emotion classification
@@ -117,9 +117,10 @@ class PrecomputePipelineV2:
         subreddits: Optional[list[str]] = None,
         reddit_query: Optional[str] = None,
         reddit_days_back: int = 3,
+        reddit_limit_per_sub: int = 50,
+        reddit_include_comments: bool = True,
+        reddit_comment_limit: int = 100,
         jsonl_path: Optional[str] = None,
-        channel: Optional[str] = None,
-        channel_days_back: int = 7,
         claims_from: Optional[str] = None,
     ) -> PipelineV2Result:
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -133,9 +134,10 @@ class PrecomputePipelineV2:
                 subreddits=subreddits,
                 reddit_query=reddit_query,
                 reddit_days_back=reddit_days_back,
+                reddit_limit_per_sub=reddit_limit_per_sub,
+                reddit_include_comments=reddit_include_comments,
+                reddit_comment_limit=reddit_comment_limit,
                 jsonl_path=jsonl_path or claims_from,
-                channel=channel,
-                channel_days_back=channel_days_back,
             ),
         ) or []
 
@@ -179,14 +181,12 @@ class PrecomputePipelineV2:
 
     def _fetch(
         self, *, subreddits, reddit_query, reddit_days_back,
-        jsonl_path, channel, channel_days_back,
+        reddit_limit_per_sub, reddit_include_comments,
+        reddit_comment_limit,
+        jsonl_path,
     ) -> list[Post]:
         if jsonl_path:
             return self._ingestion.ingest_posts_from_jsonl(jsonl_path)
-        if channel:
-            return self._ingestion.ingest_channel_today(
-                channel, days_back=channel_days_back,
-            )
         if reddit_query and subreddits:
             return self._ingestion.ingest_reddit_search(
                 reddit_query, subreddits=subreddits, days_back=reddit_days_back,
@@ -197,11 +197,19 @@ class PrecomputePipelineV2:
             )
         if subreddits and len(subreddits) == 1:
             return self._ingestion.ingest_subreddit(
-                subreddits[0], days_back=reddit_days_back,
+                subreddits[0],
+                days_back=reddit_days_back,
+                limit=reddit_limit_per_sub,
+                include_comments=reddit_include_comments,
+                comment_limit=reddit_comment_limit,
             )
         if subreddits:
             return self._ingestion.ingest_multi_subreddit(
-                subreddits=subreddits, days_back=reddit_days_back,
+                subreddits=subreddits,
+                days_back=reddit_days_back,
+                limit_per_sub=reddit_limit_per_sub,
+                include_comments=reddit_include_comments,
+                comment_limit=reddit_comment_limit,
             )
         log.warning("pipeline_v2.fetch.no_source")
         return []
@@ -253,18 +261,20 @@ class PrecomputePipelineV2:
             return
 
         skip_ids = result.duplicate_post_ids
+        run_id = result.run_id
         for p in posts:
             if p.id in skip_ids:
                 continue
             try:
+                source, subreddit, author = _post_source_fields(p)
                 self._pg.upsert_post_v2(
                     post_id=p.id,
                     account_id=p.account_id,
-                    author=p.channel_name or p.account_id,
+                    author=author,
                     text=p.text or "",
                     posted_at=p.posted_at,
-                    subreddit=None,
-                    source="reddit" if p.channel_name == "" else "telegram",
+                    subreddit=subreddit,
+                    source=source,
                     topic_id=p.topic_id,
                     dominant_emotion=p.emotion or None,
                     emotion_score=p.emotion_score or 0.0,
@@ -273,6 +283,7 @@ class PrecomputePipelineV2:
                     retweet_count=int(p.retweet_count or 0),
                     simhash=p.simhash,
                     extra={},
+                    run_id=run_id,
                 )
             except Exception as exc:
                 log.error("pipeline_v2.upsert_post_v2_error",
@@ -288,6 +299,7 @@ class PrecomputePipelineV2:
                     dominant_emotion=cluster.dominant_emotion,
                     centroid_text=cluster.centroid_text,
                     extra={},
+                    run_id=run_id,
                 )
             except Exception as exc:
                 log.error("pipeline_v2.upsert_topic_v2_error",
@@ -305,6 +317,7 @@ class PrecomputePipelineV2:
                         name=span.name,
                         entity_type=span.entity_type,
                         mention_count=1,
+                        run_id=run_id,
                     )
                     self._pg.link_post_entity_v2(
                         post_id=p.id,
@@ -317,37 +330,76 @@ class PrecomputePipelineV2:
                     log.error("pipeline_v2.entity_upsert_error",
                               entity=span.name, error=str(exc)[:120])
 
-        # Kuzu writes (best-effort)
+        # Kuzu writes - production hardening Day 6: collect everything
+        # first, then issue per-table batches via the bulk_* APIs. This
+        # halves wall-clock time vs the previous "interleave per-post"
+        # pattern at typical (50-1000 post) batch sizes.
         if self._kuzu is not None:
-            for cluster in topics:
-                try:
-                    self._kuzu.upsert_topic(cluster.topic_id, cluster.label)
-                except Exception:
-                    pass
-            for p in posts:
-                if p.id in skip_ids:
-                    continue
-                try:
-                    self._kuzu.upsert_account(p.account_id,
-                                              p.channel_name or p.account_id)
-                    self._kuzu.upsert_post(p.id, p.text or "")
-                    self._kuzu.add_posted(p.account_id, p.id)
+            try:
+                # Topics first so post -> topic edges find a target.
+                for cluster in topics:
+                    try:
+                        self._kuzu.upsert_topic(cluster.topic_id, cluster.label)
+                    except Exception:
+                        pass
+
+                accounts: list[tuple[str, str]] = []
+                post_rows: list[tuple[str, str]] = []
+                posted_rows: list[tuple[str, str]] = []
+                replied_rows: list[tuple[str, str]] = []
+                topic_rows: list[tuple[str, str]] = []
+                placeholder_post_ids: set[str] = set()
+                entity_pairs: list[tuple[str, str, str]] = []   # (eid, name, type)
+                post_entity_rows: list[tuple[str, str]] = []
+
+                for p in posts:
+                    if p.id in skip_ids:
+                        continue
+                    accounts.append(
+                        (p.account_id, p.channel_name or p.account_id)
+                    )
+                    post_rows.append((p.id, p.text or ""))
+                    posted_rows.append((p.account_id, p.id))
                     if p.topic_id:
-                        self._kuzu.add_belongs_to_topic(p.id, p.topic_id)
-                    # redesign-2026-05-kg Phase A: Replied edge.
+                        topic_rows.append((p.id, p.topic_id))
                     parent_id = getattr(p, "parent_post_id", None)
                     if parent_id:
-                        self._kuzu.upsert_post(parent_id, "")
-                        self._kuzu.add_replied(p.id, parent_id)
+                        if parent_id not in placeholder_post_ids:
+                            placeholder_post_ids.add(parent_id)
+                            post_rows.append((parent_id, ""))
+                        replied_rows.append((p.id, parent_id))
                     for span in getattr(p, "entities", []) or []:
                         ent_id = f"ent_{uuid.uuid5(uuid.NAMESPACE_DNS, span.name.lower() + span.entity_type).hex[:12]}"
-                        self._kuzu.upsert_entity(
-                            ent_id, span.name, span.entity_type,
-                        )
-                        self._kuzu.add_post_has_entity(p.id, ent_id)
-                except Exception as exc:
-                    log.error("pipeline_v2.kuzu_write_error",
-                              post_id=p.id, error=str(exc)[:120])
+                        entity_pairs.append((ent_id, span.name, span.entity_type))
+                        post_entity_rows.append((p.id, ent_id))
+
+                # Order matters: nodes -> edges (FK-safe).
+                self._kuzu.bulk_upsert_accounts(accounts)
+                self._kuzu.bulk_upsert_posts(post_rows)
+                for ent_id, name, etype in entity_pairs:
+                    try:
+                        self._kuzu.upsert_entity(ent_id, name, etype)
+                    except Exception:
+                        pass
+                self._kuzu.bulk_add_posted(posted_rows)
+                self._kuzu.bulk_add_belongs_to_topic(topic_rows)
+                self._kuzu.bulk_add_replied(replied_rows)
+                for pid, ent_id in post_entity_rows:
+                    try:
+                        self._kuzu.add_post_has_entity(pid, ent_id)
+                    except Exception:
+                        pass
+                log.info("pipeline_v2.kuzu_bulk_done",
+                         posts=len(post_rows),
+                         accounts=len(accounts),
+                         posted=len(posted_rows),
+                         topic_edges=len(topic_rows),
+                         reply_edges=len(replied_rows),
+                         entities=len(entity_pairs),
+                         entity_edges=len(post_entity_rows))
+            except Exception as exc:
+                log.error("pipeline_v2.kuzu_bulk_error",
+                          error=str(exc)[:160])
 
         # redesign-2026-05-kg Phase C.4: invalidate the in-memory KG
         # subgraph cache so subsequent analytics queries see fresh edges.
@@ -389,3 +441,19 @@ def _summarize(out: Any) -> str:
     if isinstance(out, str):
         return out[:60]
     return type(out).__name__
+
+
+def _post_source_fields(post: Post) -> tuple[str, Optional[str], str]:
+    """Normalize source metadata for the Reddit-only pipeline."""
+    source = (post.source or "reddit").strip().lower()
+    if source != "reddit":
+        source = "reddit"
+
+    subreddit = post.subreddit
+    channel = (post.channel_name or "").strip()
+    if not subreddit and channel.lower().startswith("r/"):
+        subreddit = channel[2:]
+    if subreddit:
+        subreddit = subreddit.strip().lstrip("r/")
+
+    return source, subreddit or None, post.account_id

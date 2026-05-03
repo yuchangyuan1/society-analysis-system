@@ -143,6 +143,8 @@ def _parse_post(data: dict, subreddit: str) -> Optional[Post]:
         reply_count  = data.get("num_comments", 0),
         retweet_count= data.get("num_crossposts", 0),
         posted_at    = _ts(float(data.get("created_utc", 0))),
+        source       = "reddit",
+        subreddit    = sub,
         images       = images,
     )
 
@@ -171,6 +173,8 @@ def _parse_comment(
         reply_count  = 0,
         retweet_count= 0,
         posted_at    = _ts(float(data.get("created_utc", 0))),
+        source       = "reddit",
+        subreddit    = sub,
         parent_post_id=parent_post_id,
     )
 
@@ -205,6 +209,7 @@ class RedditService:
         limit: int = 100,
         days_back: int = 7,
         include_comments: bool = True,
+        comment_limit: int = _MAX_COMMENTS,
     ) -> list[Post]:
         """Fetch posts (+ top comments) from one subreddit."""
         cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days_back)
@@ -244,7 +249,10 @@ class RedditService:
                     fetched += 1
 
                     if include_comments:
-                        for cp in self._fetch_comments(d["id"], subreddit):
+                        for cp in self._fetch_comments(
+                            d["id"], subreddit,
+                            max_comments=comment_limit,
+                        ):
                             if cp.id not in seen:
                                 seen.add(cp.id)
                                 posts.append(cp)
@@ -267,6 +275,7 @@ class RedditService:
         limit: int = 100,
         days_back: int = 7,
         include_comments: bool = True,
+        comment_limit: int = _MAX_COMMENTS,
     ) -> list[Post]:
         """Full-text Reddit search, optionally within specific subreddits."""
         cutoff    = datetime.now(tz=timezone.utc) - timedelta(days=days_back)
@@ -308,7 +317,10 @@ class RedditService:
                     fetched += 1
 
                     if include_comments:
-                        for cp in self._fetch_comments(d["id"], sub):
+                        for cp in self._fetch_comments(
+                            d["id"], sub,
+                            max_comments=comment_limit,
+                        ):
                             if cp.id not in seen:
                                 seen.add(cp.id)
                                 posts.append(cp)
@@ -329,6 +341,8 @@ class RedditService:
         sort: str = "hot",
         limit_per_sub: int = 50,
         days_back: int = 7,
+        include_comments: bool = True,
+        comment_limit: int = _MAX_COMMENTS,
     ) -> list[Post]:
         """Aggregate posts from multiple subreddits."""
         targets   = subreddits or REDDIT_DEFAULT_SUBREDDITS
@@ -337,7 +351,10 @@ class RedditService:
 
         for sub in targets:
             for post in self.get_subreddit_posts(
-                sub, sort=sort, limit=limit_per_sub, days_back=days_back
+                sub, sort=sort, limit=limit_per_sub,
+                days_back=days_back,
+                include_comments=include_comments,
+                comment_limit=comment_limit,
             ):
                 if post.id not in seen:
                     seen.add(post.id)
@@ -378,6 +395,7 @@ class RedditService:
 
     def _fetch_comments(
         self, post_id: str, subreddit: str,
+        max_comments: int = _MAX_COMMENTS,
     ) -> list[Post]:
         """Fetch the comment tree for a post (BFS, depth-limited).
 
@@ -392,7 +410,7 @@ class RedditService:
           - Min score: `_MIN_SCORE` (default 1)
         """
         url = (f"{_BASE}/r/{subreddit}/comments/{post_id}.json"
-               f"?limit={_MAX_COMMENTS}&depth={_MAX_DEPTH}&raw_json=1")
+               f"?limit={max_comments}&depth={_MAX_DEPTH}&raw_json=1")
         data = self._get_json(url)
         if not data or not isinstance(data, list) or len(data) < 2:
             return []
@@ -406,7 +424,7 @@ class RedditService:
         children = data[1].get("data", {}).get("children", [])
 
         def _walk(node: dict, parent_id: str, depth: int) -> None:
-            if len(out) >= _MAX_COMMENTS:
+            if len(out) >= max_comments:
                 return
             if depth > _MAX_DEPTH:
                 return
@@ -426,6 +444,6 @@ class RedditService:
 
         for child in children:
             _walk(child, parent_id=submission_post_id, depth=1)
-            if len(out) >= _MAX_COMMENTS:
+            if len(out) >= max_comments:
                 break
         return out

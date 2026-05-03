@@ -46,7 +46,7 @@ analysis system. Return STRICT JSON with this shape:
   "subtasks": [
     {
       "text": "self-contained rewritten question",
-      "intent": "fact_check | official_recap | community_count | community_listing | trend | propagation | comparison | explain_decision | freeform | propagation_trace | influencer_query | coordination_check | community_structure | cascade_query",
+      "intent": "fact_check | topic_claim_audit | official_recap | community_count | community_listing | trend | propagation | comparison | explain_decision | freeform | propagation_trace | influencer_query | coordination_check | community_structure | cascade_query",
       "suggested_branches": ["evidence" | "nl2sql" | "kg", ...],
       "targets": {
         "run_id": null,
@@ -69,11 +69,15 @@ Rules:
 - "this claim" -> use session_context.current_claim_id
 - "compare A and B" -> two subtasks plus optionally a 3rd "comparison" subtask
   using "comparison" intent and both branches the children used.
+- "within a topic, which claims agree with official sources, which conflict,
+  which lack enough evidence" -> one `topic_claim_audit` subtask with
+  suggested_branches ["nl2sql", "evidence"]. Keep the user's topic phrase
+  in targets.topic_id if it is a label/name rather than a raw topic_id.
 
 KG-specialised intents (KEY UPGRADE; pick these whenever applicable):
-  - propagation_trace   : "show how this rumour spread" / "trace the reply chain" /
-                          "path from A to B" / "did X end up replying to Y" ->
-                          KG only (multi-hop reply traversal; SQL can't do it)
+  - propagation_trace   : "path from A to B" / "did X end up replying to Y" ->
+                          KG only (account-to-account multi-hop traversal;
+                          SQL can't do it)
                           IMPORTANT: extract the two account ids and put
                           them under targets.metadata_filter as
                           {"source_account": "<id>", "target_account": "<id>"}.
@@ -89,7 +93,10 @@ KG-specialised intents (KEY UPGRADE; pick these whenever applicable):
   - community_structure : "echo chamber" / "are these in the same group" /
                           "cluster" / "polarised" ->
                           KG (modularity) + nl2sql for who-is-where
-  - cascade_query       : "viral" / "longest thread" / "deepest reply chain" /
+  - cascade_query       : "show reply chains for this topic" / "trace the reply
+                          chain for the topic" / "topic propagation path" /
+                          "how this topic spread" / "viral" /
+                          "longest thread" / "deepest reply chain" /
                           "what spread furthest" / "cascade size" ->
                           KG only (cascade tree, viral_cascade ranking)
 
@@ -100,6 +107,7 @@ shallow GROUP-BY answers that miss the structure of the spread.
 - suggested_branches: prefer MULTI-BRANCH unless the question is a clear
   single-aggregation SQL job. Default mappings:
     fact_check                  -> ["evidence", "nl2sql"]
+    topic_claim_audit           -> ["nl2sql", "evidence"]
     official_recap              -> ["evidence", "nl2sql"]
     community_count             -> ["nl2sql"]      (pure aggregation)
     community_listing           -> ["nl2sql", "kg"]
@@ -158,6 +166,18 @@ class QueryRewriter:
         if not subtasks:
             return self._degraded(message, ctx,
                                   fallback_reason="no_subtasks_returned")
+        if _is_topic_claim_audit_request(message):
+            target = next(
+                (s.targets for s in subtasks if s.targets.topic_id),
+                subtasks[0].targets,
+            )
+            subtasks = [Subtask(
+                text=message,
+                intent="topic_claim_audit",
+                suggested_branches=["nl2sql", "evidence"],
+                targets=target,
+                rationale="topic_claim_audit_collapsed_workflow",
+            )]
 
         rq = RewrittenQuery(
             original=message,
@@ -219,7 +239,7 @@ class QueryRewriter:
         valid_branches = {"evidence", "nl2sql", "kg"}
         valid_intents = {
             "fact_check", "official_recap", "community_count",
-            "community_listing", "trend", "propagation",
+            "topic_claim_audit", "community_listing", "trend", "propagation",
             "comparison", "explain_decision", "freeform",
             # Phase C KG-specialised
             "propagation_trace", "influencer_query",
@@ -248,6 +268,12 @@ class QueryRewriter:
                 timeframe=target_raw.get("timeframe"),
                 metadata_filter=target_raw.get("metadata_filter") or {},
             )
+            if _is_topic_reply_chain_request(text, intent, targets):
+                intent = "cascade_query"
+                branches = ["kg"]
+            if _is_topic_claim_audit_request(text):
+                intent = "topic_claim_audit"
+                branches = ["nl2sql", "evidence"]
             out.append(Subtask(
                 text=text,
                 intent=intent,
@@ -276,3 +302,60 @@ class QueryRewriter:
             inherited_context=ctx,
             fallback_reason=fallback_reason,
         )
+
+
+def _is_topic_reply_chain_request(
+    text: str,
+    intent: str,
+    targets: SubtaskTarget,
+) -> bool:
+    lowered = (text or "").lower()
+    asks_reply_chain = (
+        "reply chain" in lowered
+        or "reply chains" in lowered
+        or "thread" in lowered
+        or "cascade" in lowered
+        or "propagation path" in lowered
+        or "propagation paths" in lowered
+        or "how this topic spread" in lowered
+        or "how the topic spread" in lowered
+        or "spread" in lowered
+        or "dissemination" in lowered
+    )
+    has_account_path = bool(
+        (targets.metadata_filter or {}).get("source_account")
+        and (targets.metadata_filter or {}).get("target_account")
+    )
+    return (
+        asks_reply_chain
+        and not has_account_path
+        and intent in {"propagation_trace", "propagation", "cascade_query"}
+    )
+
+
+def _is_topic_claim_audit_request(text: str) -> bool:
+    lowered = (text or "").lower()
+    has_claims = (
+        "claim" in lowered or "claims" in lowered
+        or "说法" in lowered or "观点" in lowered
+    )
+    has_topic = (
+        "topic" in lowered or "within" in lowered or "inside" in lowered
+        or "主题" in lowered
+    )
+    has_official_compare = (
+        "official" in lowered
+        or "evidence" in lowered
+        or "citation" in lowered
+        or "source" in lowered
+        or "官方" in lowered
+        or "证据" in lowered
+        or "引用" in lowered
+    )
+    has_verdict_buckets = any(k in lowered for k in (
+        "consistent", "agree", "same as", "support",
+        "contradict", "conflict", "different",
+        "insufficient", "not enough evidence", "no enough evidence",
+        "一致", "矛盾", "不同", "证据不足", "无法判断",
+    ))
+    return has_claims and has_topic and has_official_compare and has_verdict_buckets

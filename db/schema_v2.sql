@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS posts_v2 (
     text              TEXT NOT NULL,        -- compressed / merged text
     posted_at         TIMESTAMPTZ,
     subreddit         TEXT,                 -- nullable for non-Reddit sources
-    source            TEXT NOT NULL DEFAULT 'reddit',  -- reddit | telegram | x | fixture
+    source            TEXT NOT NULL DEFAULT 'reddit',  -- reddit | fixture
     topic_id          TEXT,                 -- assigned by post-level clusterer
     dominant_emotion  TEXT,                 -- fear | anger | hope | disgust | neutral
     emotion_score     REAL DEFAULT 0.0,
@@ -35,7 +35,11 @@ CREATE TABLE IF NOT EXISTS posts_v2 (
     simhash           BIGINT,               -- 64-bit simhash for dedup
     text_tsv          tsvector,             -- generated below
     extra             JSONB NOT NULL DEFAULT '{}'::jsonb,
-    ingested_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    ingested_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- production hardening Day 2-3: run lineage so we can answer
+    -- "which pipeline run produced this row" and roll back failed runs.
+    first_seen_in_run TEXT NOT NULL DEFAULT 'legacy_pre_v6',
+    last_updated_in_run TEXT NOT NULL DEFAULT 'legacy_pre_v6'
 );
 
 -- Generated tsvector column maintained by trigger to avoid PG version
@@ -71,7 +75,9 @@ CREATE TABLE IF NOT EXISTS topics_v2 (
     centroid_text     TEXT,         -- representative post text
     extra             JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    first_seen_in_run TEXT NOT NULL DEFAULT 'legacy_pre_v6',
+    last_updated_in_run TEXT NOT NULL DEFAULT 'legacy_pre_v6'
 );
 
 -- ---------- entities_v2 ----------------------------------------------------
@@ -82,7 +88,9 @@ CREATE TABLE IF NOT EXISTS entities_v2 (
                           ('PERSON','ORG','LOC','EVENT','OTHER')),
     mention_count     INTEGER NOT NULL DEFAULT 1,
     extra             JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    first_seen_in_run TEXT NOT NULL DEFAULT 'legacy_pre_v6',
+    last_updated_in_run TEXT NOT NULL DEFAULT 'legacy_pre_v6'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_v2_name_type
     ON entities_v2 (LOWER(name), entity_type);

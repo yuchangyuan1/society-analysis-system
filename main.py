@@ -9,9 +9,6 @@ Usage:
     # Reddit ingestion + v2 precompute (5 stages + schema_propose + persist)
     python main.py --subreddit conspiracy --days 3
 
-    # Telegram channel
-    python main.py --channel SomeChannel --days 7
-
     # Reproducible run from a JSONL fixture
     python main.py --jsonl tests/fixtures/sample_posts.jsonl
 
@@ -49,7 +46,6 @@ from services.kuzu_service import KuzuService
 from services.postgres_service import PostgresService
 from services.reddit_service import RedditService
 from services.schema_sync import SchemaSync
-from services.telegram_service import TelegramService
 
 structlog.configure(
     processors=[
@@ -65,21 +61,16 @@ log = structlog.get_logger(__name__)
 
 def _build_ingestion() -> IngestionAgent:
     pg = PostgresService()
-    kuzu = KuzuService()
+    # Writer instance: the pipeline mutates Kuzu.
+    kuzu = KuzuService(read_only=False)
     vision = ClaudeVisionService()
-    telegram = None
-    try:
-        telegram = TelegramService()
-    except Exception as exc:
-        log.warning("main.telegram_unavailable", error=str(exc)[:120])
     reddit = None
     try:
         reddit = RedditService()
     except Exception as exc:
         log.warning("main.reddit_unavailable", error=str(exc)[:120])
     return IngestionAgent(
-        pg=pg, kuzu=kuzu, vision=vision,
-        telegram=telegram, x_api=None, reddit=reddit,
+        pg=pg, kuzu=kuzu, vision=vision, reddit=reddit,
     )
 
 
@@ -91,20 +82,43 @@ def main() -> int:
                         help="Subreddit (comma-separate for multi).")
     parser.add_argument("--reddit-query", default=None,
                         help="Full-text search query on Reddit.")
-    parser.add_argument("--channel", default=None,
-                        help="Telegram channel handle.")
     parser.add_argument("--jsonl", default=None,
                         help="JSONL file of pre-collected posts.")
     parser.add_argument("--days", type=int, default=7,
                         help="Days back to fetch (default 7).")
+    parser.add_argument("--reddit-limit", type=int, default=50,
+                        help="Max Reddit submissions per subreddit "
+                             "(default 50).")
+    parser.add_argument("--no-comments", action="store_true",
+                        help="Skip Reddit comment-tree fetches. Useful for "
+                             "fast smoke runs and avoiding slow Reddit "
+                             "comment endpoints.")
+    parser.add_argument("--reddit-comment-limit", type=int, default=100,
+                        help="Max Reddit comments to fetch per submission "
+                             "when comments are enabled (default 100).")
     args = parser.parse_args()
 
-    if not (args.subreddit or args.reddit_query or args.channel
-            or args.jsonl):
+    if not (args.subreddit or args.reddit_query or args.jsonl):
         parser.error(
             "Specify at least one source: --subreddit, --reddit-query, "
-            "--channel, or --jsonl."
+            "or --jsonl."
         )
+
+    # ── Production hardening Day 4: roll back any half-finished runs from a
+    # previous crash before we start a fresh one. Keeps PG / Chroma / Kuzu
+    # from accumulating partial-write garbage.
+    try:
+        ms_scan = ManifestService()
+        pending = ms_scan.list_pending_runs()
+        if pending:
+            log.warning("main.pending_runs_detected",
+                        count=len(pending),
+                        run_ids=[m.run_id for m in pending])
+            from scripts.data_admin import _rollback_one
+            for m in pending:
+                _rollback_one(m.run_id)
+    except Exception as exc:
+        log.warning("main.startup_rollback_failed", error=str(exc)[:200])
 
     ingestion = _build_ingestion()
     knowledge = KnowledgeAgent()
@@ -133,12 +147,11 @@ def main() -> int:
     # New run dir
     ms = ManifestService()
     manifest = ms.new_run(
-        query_text=(args.reddit_query or args.channel or args.subreddit or ""),
+        query_text=(args.reddit_query or args.subreddit or ""),
         subreddits=[s.strip() for s in (args.subreddit or "").split(",")
                      if s.strip()] or None,
         reddit_query=args.reddit_query,
         reddit_sort="hot",
-        channel=args.channel,
         jsonl_path=args.jsonl,
         image_url=None,
         image_path=None,
@@ -151,15 +164,23 @@ def main() -> int:
         [s.strip() for s in args.subreddit.split(",") if s.strip()]
         if args.subreddit else None
     )
-    result = pipeline.run(
-        run_dir=run_dir,
-        subreddits=subreddits,
-        reddit_query=args.reddit_query,
-        reddit_days_back=args.days,
-        jsonl_path=args.jsonl,
-        channel=args.channel,
-        channel_days_back=args.days,
-    )
+    try:
+        result = pipeline.run(
+            run_dir=run_dir,
+            subreddits=subreddits,
+            reddit_query=args.reddit_query,
+            reddit_days_back=args.days,
+            reddit_limit_per_sub=args.reddit_limit,
+            reddit_include_comments=not args.no_comments,
+            reddit_comment_limit=args.reddit_comment_limit,
+            jsonl_path=args.jsonl,
+        )
+        ms.finalize(manifest, post_count=len(result.posts))
+    except Exception as exc:
+        ms.mark_failed(manifest, error=str(exc)[:500])
+        log.error("main.run_failed", run_id=manifest.run_id,
+                  error=str(exc)[:500])
+        raise
 
     log.info("main.run_done",
              run_id=result.run_id,

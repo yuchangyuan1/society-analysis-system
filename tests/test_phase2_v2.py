@@ -215,6 +215,25 @@ def test_nl2sql_memory_schema_uses_deterministic_id():
 
 # ── PostDeduper ──────────────────────────────────────────────────────────────
 
+def test_nl2sql_memory_guidance_uses_stable_id():
+    cols = MagicMock()
+    cols.nl2sql.upsert = MagicMock()
+    cols.nl2sql.handle = MagicMock()
+    memory = NL2SQLMemory(collections=cols)
+    rid = memory.upsert_guidance(
+        rule_id="Broad Topic Listing",
+        text="List topics should not narrow to one topic_id.",
+        embedding=[0.0] * 8,
+        category="rule",
+        priority=100,
+    )
+    assert rid == "guide::broad_topic_listing"
+    args, kwargs = cols.nl2sql.upsert.call_args
+    assert kwargs["ids"] == ["guide::broad_topic_listing"]
+    assert kwargs["metadatas"][0]["kind"] == "guide"
+    assert kwargs["metadatas"][0]["priority"] == 100
+
+
 def test_simhash_identical_texts_have_zero_distance():
     a = compute_simhash("the quick brown fox jumps over the lazy dog")
     b = compute_simhash("the quick brown fox jumps over the lazy dog")

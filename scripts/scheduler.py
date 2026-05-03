@@ -119,16 +119,11 @@ def _run_precompute_v2(args: dict) -> dict:
     from services.postgres_service import PostgresService
     from services.reddit_service import RedditService
     from services.schema_sync import SchemaSync
-    from services.telegram_service import TelegramService
 
     pg = PostgresService()
-    kuzu = KuzuService()
+    # Writer instance: scheduled pipeline run mutates Kuzu.
+    kuzu = KuzuService(read_only=False)
     vision = ClaudeVisionService()
-    telegram = None
-    try:
-        telegram = TelegramService()
-    except Exception as exc:
-        log.warning("scheduler.telegram_unavailable", error=str(exc)[:120])
     reddit = None
     try:
         reddit = RedditService()
@@ -136,8 +131,7 @@ def _run_precompute_v2(args: dict) -> dict:
         log.warning("scheduler.reddit_unavailable", error=str(exc)[:120])
 
     ingestion = IngestionAgent(
-        pg=pg, kuzu=kuzu, vision=vision,
-        telegram=telegram, x_api=None, reddit=reddit,
+        pg=pg, kuzu=kuzu, vision=vision, reddit=reddit,
     )
 
     pipeline = PrecomputePipelineV2(
@@ -157,12 +151,10 @@ def _run_precompute_v2(args: dict) -> dict:
     subreddits = args.get("subreddits") or None
     manifest = ms.new_run(
         query_text=(args.get("reddit_query")
-                     or args.get("channel")
                      or (",".join(subreddits) if subreddits else "")),
         subreddits=subreddits,
         reddit_query=args.get("reddit_query"),
         reddit_sort="hot",
-        channel=args.get("channel"),
         jsonl_path=args.get("jsonl_path"),
         image_url=None,
         image_path=None,
@@ -175,8 +167,6 @@ def _run_precompute_v2(args: dict) -> dict:
         reddit_query=args.get("reddit_query"),
         reddit_days_back=int(args.get("reddit_days_back", 1)),
         jsonl_path=args.get("jsonl_path"),
-        channel=args.get("channel"),
-        channel_days_back=int(args.get("channel_days_back", 1)),
     )
     return {
         "run_id": result.run_id,

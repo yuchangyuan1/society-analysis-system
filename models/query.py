@@ -18,6 +18,7 @@ BranchName = Literal["evidence", "nl2sql", "kg"]
 
 SubtaskIntent = Literal[
     "fact_check",          # verify a claim against official sources
+    "topic_claim_audit",   # classify claims inside a topic vs official evidence
     "official_recap",      # what does an authoritative source say
     "community_count",     # filter / count / group on community posts
     "community_listing",   # show me the posts about X

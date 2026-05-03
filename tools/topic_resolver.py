@@ -26,6 +26,7 @@ Caching:
 from __future__ import annotations
 
 import math
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -88,6 +89,11 @@ class TopicResolver:
         if not self._cache.rows:
             return []
 
+        k = top_k if top_k is not None else self._top_k
+        exact = _exact_label_matches(phrase, self._cache.rows)
+        if exact:
+            return exact[:k]
+
         try:
             query_vec = self._embeddings.embed(phrase)
         except Exception as exc:
@@ -113,7 +119,6 @@ class TopicResolver:
         # Always return at least the top match if it clears the floor.
         if not kept and top_sim >= self._min_similarity:
             kept = [scored[0]]
-        k = top_k if top_k is not None else self._top_k
         return kept[:k]
 
     # ── Cache management ──────────────────────────────────────────────────────
@@ -175,3 +180,44 @@ def _cosine(a: list[float], b: list[float]) -> float:
     if na == 0.0 or nb == 0.0:
         return 0.0
     return dot / math.sqrt(na * nb)
+
+
+def _exact_label_matches(phrase: str, rows: list[dict]) -> list[TopicMatch]:
+    """Prefer exact/contained topic labels before semantic nearest-neighbor.
+
+    Users often paste or paraphrase a generated topic label inside a longer
+    instruction: "trace propagation for US Military Arms Sales Controversy".
+    In that case an embedding-only resolver can choose a nearby sibling topic
+    with no KG signal. A normalized label containment match is more precise.
+    """
+    phrase_norm = _normalize_topic_text(phrase)
+    if not phrase_norm:
+        return []
+    matches: list[tuple[int, int, TopicMatch]] = []
+    for row in rows:
+        label = row.get("label") or ""
+        label_norm = _normalize_topic_text(label)
+        if not label_norm or len(label_norm) < 8:
+            continue
+        if (
+            phrase_norm == label_norm
+            or label_norm in phrase_norm
+            or phrase_norm in label_norm
+        ):
+            matches.append((
+                len(label_norm),
+                int(row.get("post_count") or 0),
+                TopicMatch(
+                    topic_id=row["topic_id"],
+                    label=label or row["topic_id"],
+                    similarity=1.0,
+                ),
+            ))
+    matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [m for _, _, m in matches]
+
+
+def _normalize_topic_text(value: str) -> str:
+    value = (value or "").lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()

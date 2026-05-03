@@ -56,6 +56,7 @@ KGQueryKind = Literal[
     "topic_correlation",
     "cascade_tree",
     "viral_cascade",
+    "reply_chains",
     # NetworkX-backed (KGAnalytics)
     "influencer_rank",
     "bridge_accounts",

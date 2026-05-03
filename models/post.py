@@ -19,13 +19,15 @@ class ImageAsset(BaseModel):
 class Post(BaseModel):
     id: str
     account_id: str
-    channel_name: str = ""     # human-readable channel / username (Telegram: @handle)
+    channel_name: str = ""     # human-readable source label, e.g. r/worldnews
     text: str
     lang: str = "en"
     retweet_count: int = 0
     like_count: int = 0
     reply_count: int = 0
     posted_at: Optional[datetime] = None
+    source: str = ""           # reddit
+    subreddit: Optional[str] = None
     images: list[ImageAsset] = Field(default_factory=list)
     # Phase 0: Emotional State
     emotion: str = ""          # fear | anger | hope | disgust | neutral
@@ -36,7 +38,7 @@ class Post(BaseModel):
     topic_id: Optional[str] = None
     # redesign-2026-05 Phase 2.8: 64-bit simhash for near-duplicate detection
     simhash: Optional[int] = None
-    # redesign-2026-05-kg Phase A: Reddit comment / Telegram reply chains.
+    # redesign-2026-05-kg Phase A: Reddit comment/reply chains.
     # When set, ingestion writes a Kuzu (this Post) -[:Replied]-> (parent Post)
     # edge so propagation queries actually have multi-hop data.
     parent_post_id: Optional[str] = None

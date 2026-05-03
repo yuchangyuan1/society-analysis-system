@@ -75,10 +75,12 @@ data/kuzu_graph.lock
 data/runs/
 data/sessions/
 data/official_chunks/
-data/raw_media/
-data/whisper_tmp/
 data/*.db
 data/*.jsonl
+data/*.png
+data/*.jpg
+data/*.jpeg
+data/*.webp
 
 # ── Streamlit ─────────────────────────────────────────────────────────────
 .streamlit/secrets.toml

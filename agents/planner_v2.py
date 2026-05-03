@@ -39,6 +39,7 @@ from models.branch_output import (
     BranchExecutionStatus,
     EvidenceOutput,
     KGOutput,
+    SQLAttempt,
     SQLOutput,
 )
 from models.query import RewrittenQuery, Subtask
@@ -98,6 +99,7 @@ class _BranchRouter:
         # Fact-check NEEDS official sources, but the community angle
         # (who is actually saying it on Reddit) is part of the answer.
         "fact_check":         ["evidence", "nl2sql"],
+        "topic_claim_audit":  ["nl2sql", "evidence"],
         # Recap an authoritative source. Add nl2sql so we can say
         # whether the community discussed it.
         "official_recap":     ["evidence", "nl2sql"],
@@ -126,10 +128,10 @@ class _BranchRouter:
 
 _TOPIC_SCOPED_INTENTS = {
     "community_count", "community_listing", "trend",
-    "propagation", "explain_decision",
+    "propagation", "explain_decision", "topic_claim_audit",
     # KG-specialised intents that benefit from semantic topic resolution
-    "influencer_query", "coordination_check", "community_structure",
-    "cascade_query",
+    "propagation_trace", "influencer_query", "coordination_check",
+    "community_structure", "cascade_query",
 }
 
 
@@ -191,6 +193,8 @@ class BoundedPlannerV2:
         invocations: list[BranchInvocation] = []
         for idx, sub in enumerate(rq.subtasks):
             branches = router.route(sub)[: self.max_parallel_branches]
+            if _is_broad_topic_listing(sub):
+                branches = ["nl2sql"]
             # Pre-resolve semantic topic match for topic-scoped subtasks
             # so NL2SQL / KG get a concrete topic_id list to filter on.
             resolved_topic_ids = self._resolve_topics_for_subtask(sub)
@@ -210,15 +214,21 @@ class BoundedPlannerV2:
 
     def _resolve_topics_for_subtask(self, sub: Subtask) -> list[dict]:
         """Run the semantic topic resolver. Returns list of {topic_id, label, similarity}."""
-        # If the rewriter already pinned a specific topic_id, trust it.
-        if sub.targets.topic_id:
+        if _is_broad_topic_listing(sub):
+            return []
+        # If the rewriter already pinned a real topic_id, trust it. Do not
+        # trust natural-language labels here: the rewriter can inherit labels
+        # from prior model prose (for example "Global Politics"), and passing
+        # those into Kuzu as ids yields empty graph results.
+        if sub.targets.topic_id and _looks_like_topic_id(sub.targets.topic_id):
             return [{
                 "topic_id": sub.targets.topic_id,
                 "label": "",
                 "similarity": 1.0,
             }]
-        # Only run for topic-scoped intents
-        if sub.intent not in _TOPIC_SCOPED_INTENTS:
+        # Only run for topic-scoped intents, unless we have a non-id topic
+        # target that needs coercion.
+        if sub.intent not in _TOPIC_SCOPED_INTENTS and not sub.targets.topic_id:
             return []
         if self.topic_resolver is None:
             try:
@@ -229,7 +239,8 @@ class BoundedPlannerV2:
                             error=str(exc)[:160])
                 return []
         try:
-            matches = self.topic_resolver.resolve(sub.text, top_k=3)
+            phrase = sub.targets.topic_id or sub.text
+            matches = self.topic_resolver.resolve(phrase, top_k=3)
         except Exception as exc:
             log.warning("planner_v2.topic_resolve_error",
                         error=str(exc)[:160])
@@ -255,22 +266,33 @@ class BoundedPlannerV2:
         topic_id_list = [t["topic_id"] for t in resolved_topic_ids]
 
         if branch == "evidence":
+            query = sub.text
+            if sub.intent == "topic_claim_audit" and resolved_topic_ids:
+                labels = ", ".join(
+                    t.get("label") or t.get("topic_id", "")
+                    for t in resolved_topic_ids
+                )
+                query = (
+                    f"Official/evidence sources relevant to claims in topic "
+                    f"{labels}: {sub.text}"
+                )
             return {
-                "query": sub.text,
+                "query": query,
                 "metadata_filter": sub.targets.metadata_filter,
             }
         if branch == "nl2sql":
-            payload = {"nl_query": sub.text}
+            payload = {"nl_query": sub.text, "intent": sub.intent}
             if topic_id_list:
                 # Append a structured hint that NL2SQL's prompt knows
                 # to consume.
                 payload["topic_id_hints"] = resolved_topic_ids
             return payload
         if branch == "kg":
-            payload: dict[str, Any] = {"intent": sub.intent}
+            payload: dict[str, Any] = {"intent": sub.intent, "query": sub.text}
             # KG runner picks a single topic_id; use the top match.
             if topic_id_list:
                 payload["topic_id"] = topic_id_list[0]
+                payload["topic_id_hints"] = resolved_topic_ids
             elif sub.targets.topic_id:
                 payload["topic_id"] = sub.targets.topic_id
             if sub.targets.account_id:
@@ -426,11 +448,84 @@ def default_evidence_runner(inv: BranchInvocation) -> EvidenceOutput:
 
 
 def default_nl2sql_runner(inv: BranchInvocation) -> SQLOutput:
+    if inv.payload.get("intent") == "topic_claim_audit":
+        direct = _topic_claim_audit_sql(inv)
+        if direct is not None:
+            return direct
     from tools.nl2sql_tools import NL2SQLTool
     return NL2SQLTool().answer(
         inv.payload.get("nl_query", ""),
         topic_id_hints=inv.payload.get("topic_id_hints"),
     )
+
+
+def _topic_claim_audit_sql(inv: BranchInvocation) -> Optional[SQLOutput]:
+    """Deterministic SQL for topic-scoped claim audits.
+
+    The task needs source rows for claim extraction, not an aggregate. Keeping
+    this path deterministic avoids NL2SQL drifting into counts or topic lists.
+    """
+    hints = inv.payload.get("topic_id_hints") or []
+    topic_ids = [
+        str(h.get("topic_id") or "")
+        for h in hints
+        if isinstance(h, dict) and h.get("topic_id")
+    ]
+    if not topic_ids:
+        return None
+
+    final_sql = (
+        "SELECT p.post_id, p.author, p.subreddit, p.posted_at, "
+        "p.like_count, p.reply_count, p.dominant_emotion, "
+        "t.topic_id, t.label AS topic_label, p.text "
+        "FROM posts_v2 p "
+        "LEFT JOIN topics_v2 t ON p.topic_id = t.topic_id "
+        "WHERE p.source = 'reddit' "
+        f"AND p.topic_id IN ({', '.join(repr(t) for t in topic_ids)}) "
+        "ORDER BY (p.like_count + p.reply_count) DESC, "
+        "p.posted_at DESC NULLS LAST "
+        "LIMIT 20"
+    )
+
+    out = SQLOutput(
+        nl_query=inv.payload.get("nl_query", ""),
+        final_sql=final_sql,
+        columns=[
+            "post_id", "author", "subreddit", "posted_at",
+            "like_count", "reply_count", "dominant_emotion",
+            "topic_id", "topic_label", "text",
+        ],
+    )
+    try:
+        from services.postgres_service import PostgresService
+        pg = PostgresService()
+        pg.connect()
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.post_id, p.author, p.subreddit, p.posted_at,
+                       p.like_count, p.reply_count, p.dominant_emotion,
+                       t.topic_id, t.label AS topic_label, p.text
+                FROM posts_v2 p
+                LEFT JOIN topics_v2 t ON p.topic_id = t.topic_id
+                WHERE p.source = 'reddit'
+                  AND p.topic_id = ANY(%s)
+                ORDER BY (p.like_count + p.reply_count) DESC,
+                         p.posted_at DESC NULLS LAST
+                LIMIT 20
+                """,
+                (topic_ids,),
+            )
+            out.rows = list(cur.fetchall())
+        out.success = True
+    except Exception as exc:
+        out.attempts.append(SQLAttempt(
+            sql=final_sql,
+            error=str(exc)[:240],
+            error_kind="sql_connection",
+        ))
+        out.success = False
+    return out
 
 
 def default_kg_runner(inv: BranchInvocation) -> KGOutput:
@@ -449,6 +544,8 @@ def default_kg_runner(inv: BranchInvocation) -> KGOutput:
 
     intent = inv.payload.get("intent", "freeform")
     topic_id = inv.payload.get("topic_id") or ""
+    topic_id = _coerce_topic_id(topic_id)
+    topic_candidates = _candidate_topic_ids(inv, topic_id)
 
     # Anchor-less queries: try to back-fill from the most-discussed topic so
     # KG actually produces signal.
@@ -462,6 +559,15 @@ def default_kg_runner(inv: BranchInvocation) -> KGOutput:
         src = inv.payload.get("source_account") or ""
         dst = inv.payload.get("target_account") or ""
         if not src or not dst:
+            if topic_candidates:
+                return _first_kg_output_with_signal(
+                    topic_candidates,
+                    lambda tid: KGQueryTool().topic_reply_chains(
+                        topic_id=tid,
+                        top_k=int(inv.payload.get("top_k", 5)),
+                        max_depth=int(inv.payload.get("max_depth", 5)),
+                    ),
+                )
             from models.branch_output import KGOutput as _KGOut
             return _KGOut(
                 query_kind="propagation_path",
@@ -474,30 +580,67 @@ def default_kg_runner(inv: BranchInvocation) -> KGOutput:
 
     # ── cascade_query (KGQueryTool) ──────────────────────────────────────────
     if intent == "cascade_query":
-        return KGQueryTool().viral_cascade(
-            topic_id=topic_id,
-            top_k=int(inv.payload.get("top_k", 5)),
+        query_text = (inv.payload.get("query") or "").lower()
+        if (
+            "reply chain" in query_text
+            or "reply chains" in query_text
+            or "thread" in query_text
+            or "propagation path" in query_text
+            or "propagation paths" in query_text
+            or "spread" in query_text
+            or "dissemination" in query_text
+        ):
+            return _first_kg_output_with_signal(
+                topic_candidates,
+                lambda tid: KGQueryTool().topic_reply_chains(
+                    topic_id=tid,
+                    top_k=int(inv.payload.get("top_k", 5)),
+                    max_depth=int(inv.payload.get("max_depth", 5)),
+                ),
+            )
+        return _first_kg_output_with_signal(
+            topic_candidates,
+            lambda tid: KGQueryTool().viral_cascade(
+                topic_id=tid,
+                top_k=int(inv.payload.get("top_k", 5)),
+            ),
         )
 
     # ── KGAnalytics methods (Phase B.3) ──────────────────────────────────────
     from agents.kg_analytics import KGAnalytics
     analytics = KGAnalytics()
 
+    # Day 7 freshness: trending / propagation / influencer queries
+    # default to a 30-day window. Fact-check / official-recap / general
+    # KG queries don't pre-filter by time.
+    since_days = int(inv.payload.get("since_days", 30))
+
     if intent == "influencer_query":
-        return analytics.influencer_rank(
-            topic_id=topic_id or None,
-            top_k=int(inv.payload.get("top_k", 10)),
+        return _first_kg_output_with_signal(
+            topic_candidates or [""],
+            lambda tid: analytics.influencer_rank(
+                topic_id=tid or None,
+                top_k=int(inv.payload.get("top_k", 10)),
+                since_days=since_days,
+            ),
         )
     if intent in ("coordination_check", "propagation"):
-        return analytics.coordinated_groups(
-            topic_id=topic_id or None,
-            min_size=int(inv.payload.get("min_size", 3)),
+        return _first_kg_output_with_signal(
+            topic_candidates or [""],
+            lambda tid: analytics.coordinated_groups(
+                topic_id=tid or None,
+                min_size=int(inv.payload.get("min_size", 3)),
+                since_days=since_days,
+            ),
         )
     if intent == "community_structure":
-        return analytics.echo_chamber(
-            topic_id=topic_id,
-            modularity_threshold=float(
-                inv.payload.get("modularity_threshold", 0.3),
+        return _first_kg_output_with_signal(
+            topic_candidates,
+            lambda tid: analytics.echo_chamber(
+                topic_id=tid,
+                modularity_threshold=float(
+                    inv.payload.get("modularity_threshold", 0.3),
+                ),
             ),
         )
 
@@ -506,7 +649,12 @@ def default_kg_runner(inv: BranchInvocation) -> KGOutput:
         from models.branch_output import KGOutput as _KGOut
         return _KGOut(query_kind="influencer_rank",
                        target={"reason": "no topic anchor available"})
-    return analytics.influencer_rank(topic_id=topic_id, top_k=10)
+    return _first_kg_output_with_signal(
+        topic_candidates,
+        lambda tid: analytics.influencer_rank(
+            topic_id=tid, top_k=10, since_days=since_days,
+        ),
+    )
 
 
 _ACCOUNT_ID_RE = re.compile(
@@ -572,6 +720,109 @@ def _extract_account_ids(text: str) -> list[str]:
             seen.add(match)
             out.append(match)
     return out[:5]
+
+
+def _looks_like_topic_id(value: str) -> bool:
+    return bool(re.match(r"^topic_[A-Za-z0-9]+$", value or ""))
+
+
+def _is_broad_topic_listing(sub: Subtask) -> bool:
+    """True when the user wants the topic catalogue, not one topic."""
+    text = (sub.text or "").lower()
+    if sub.intent not in {"community_listing", "community_count", "trend"}:
+        return False
+    if not re.search(
+        r"\b(list|show|what|which|all|today'?s|todays)\b.*\btopics?\b"
+        r"|\btopics?\b.*\b(topic_id|post count|dominant emotion|label)\b"
+        r"|有哪些\s*topics?",
+        text,
+    ):
+        return False
+    return not re.search(
+        r"\b(amplif|influenc|propagat|spread|path|trace|cascade|central)\w*\b",
+        text,
+    )
+
+
+def _coerce_topic_id(value: str) -> str:
+    """Return a real topic_id for `value`, resolving labels when needed."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if _looks_like_topic_id(value):
+        return value
+    # Preserve compact synthetic ids used by tests and legacy fixtures. Natural
+    # language labels from the LLM usually contain spaces or punctuation.
+    if re.match(r"^[A-Za-z0-9_-]+$", value):
+        return value
+    try:
+        from tools.topic_resolver import TopicResolver
+        matches = TopicResolver().resolve(value, top_k=1)
+        if matches:
+            return matches[0].topic_id
+    except Exception as exc:
+        log.warning("planner_v2.topic_coerce_failed",
+                    topic=value[:80], error=str(exc)[:120])
+    return value
+
+
+def _candidate_topic_ids(inv: BranchInvocation, primary_topic_id: str) -> list[str]:
+    """Return ordered topic candidates for KG queries.
+
+    TopicResolver may return several plausible topics. KG should not give up
+    after the first candidate if that subgraph has no nodes/edges.
+    """
+    out: list[str] = []
+    if primary_topic_id:
+        out.append(primary_topic_id)
+    for hint in inv.payload.get("topic_id_hints") or []:
+        if not isinstance(hint, dict):
+            continue
+        tid = _coerce_topic_id(str(hint.get("topic_id") or ""))
+        if tid and tid not in out:
+            out.append(tid)
+    return out
+
+
+def _first_kg_output_with_signal(
+    topic_ids: list[str],
+    factory: Callable[[str], KGOutput],
+) -> KGOutput:
+    """Try KG topic candidates until one returns graph signal.
+
+    This is a workflow-level guard against near-miss topic resolution:
+    candidate #1 can be semantically close but have no Kuzu subgraph, while
+    candidate #2/#3 has the actual reply/cascade evidence.
+    """
+    if not topic_ids:
+        return KGOutput(
+            query_kind="influencer_rank",
+            target={"reason": "no topic anchor available"},
+        )
+    first: Optional[KGOutput] = None
+    attempted: list[str] = []
+    for tid in topic_ids:
+        attempted.append(tid)
+        out = factory(tid)
+        out.target.setdefault("attempted_topic_ids", list(attempted))
+        if first is None:
+            first = out
+        if _kg_output_has_signal(out):
+            return out
+    assert first is not None
+    first.target.setdefault("attempted_topic_ids", attempted)
+    return first
+
+
+def _kg_output_has_signal(out: KGOutput) -> bool:
+    if out.nodes or out.edges:
+        return True
+    for key, value in out.metrics.items():
+        if key in {"cache_hit", "since_days"}:
+            continue
+        if isinstance(value, (int, float)) and value > 0:
+            return True
+    return False
 
 
 def _resolve_default_topic_id() -> str | None:

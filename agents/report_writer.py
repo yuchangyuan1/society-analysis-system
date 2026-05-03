@@ -15,7 +15,8 @@ Design constraints (PROJECT_REDESIGN_V2.md 1.2):
 - If the planner failed to produce any branch output, we degrade to a
   short "I couldn't gather enough data" fallback rather than hallucinating.
 - Post-processes the markdown to swap raw `topic_*` / `ent_*` ids for
-  human-readable labels/names by looking up topics_v2 / entities_v2.
+  human-readable labels/names by looking up topics_v2 / entities_v2, except
+  when the user explicitly requested raw ids.
 """
 from __future__ import annotations
 
@@ -61,9 +62,35 @@ Hard rules:
   array, with source_branch matching the actual source.
 - Cite evidence chunks inline as `[chunk_id]` whenever you reference a
   fact attributed to an official source.
+- Do not expose raw chunk_ids as the only citation in user-facing prose. When
+  citing evidence, write a findable source reference with source, title, date
+  or URL when available. Example:
+  "(Evidence: AP News, \"Mexico City is sinking so quickly...\", 2026-05-01,
+  https://apnews.com)".
+- Never write placeholder citations such as "[chunk_id not available]" or
+  "[citation needed]". If no specific chunk_id supports the claim, classify
+  it as insufficient evidence.
 - If the user asks something the data doesn't cover, say so explicitly.
 - Do NOT invent SQL rows, account ids, or chunk ids.
-- Keep the report under 300 words. Use bullet points for lists.
+- Never treat a SQL string as evidence. SQL only tells you what was queried;
+  only `rows` contain Reddit/community facts.
+- If an SQL output says rows=0, state that no matching Reddit/community rows
+  were retrieved. Do not describe Reddit posts, comments, authors, counts, or
+  discussion themes for that SQL output.
+- If the user explicitly asks for topic_id or entity_id, preserve those raw
+  ids in the markdown and put the human-readable label/name next to them.
+- If an SQL row is shown in the payload, use its actual values. Do not write
+  "data not shown" or "not fully shown" for columns present in that row.
+- For list/table questions backed by SQL rows, preserve the SQL row order and
+  do not skip rows before the output limit. If you summarize only some rows,
+  use the first N rows in order.
+- For SQL list questions where the payload shows 20 or fewer rows, include
+  every shown row unless the user explicitly asks for a summary. If you show
+  only a subset, say "top N" and do not imply it is the full result.
+- For SQL topic lists, use compact one-line bullets:
+  "**label** (`topic_id`) - post_count: N; dominant_emotion: X".
+  This is still a report, not a table, and it keeps all rows visible.
+- Keep the report under 1200 words. Use bullet points for lists.
 - Output STRICT JSON only. No prose. No code fences.
 
 Graph (KG) presentation rules:
@@ -82,6 +109,47 @@ Graph (KG) presentation rules:
   scores in plain language ("most influential", "central bridge",
   "tight cluster of N accounts"), and quote one or two characteristic
   posts when post-level data is in the bundle.
+
+Fact-check / official-source verification rules:
+- Start with a short verdict using one of these labels:
+  "Supported by official sources", "Contradicted by official sources",
+  "Not found in official sources", or "Insufficient evidence".
+- Official-source verification must be based only on evidence chunks. If no
+  evidence chunks were retrieved, say no official-source evidence was retrieved.
+- Reddit/community corroboration must be based only on non-empty SQL rows. If
+  SQL rows are empty, explicitly say no matching Reddit rows were retrieved.
+- If official chunks are related but do not address the exact claim, classify
+  the official verification as "Not found in official sources" or
+  "Insufficient evidence", not as supported.
+
+Topic claim audit rules:
+- Use this mode when the user asks which claims inside a topic agree with
+  official/evidence sources, conflict with them, or lack enough evidence.
+- Extract candidate claims only from SQL rows. Each reported claim must name
+  the Reddit author and, when present, post_id.
+- Ignore rows that are only questions, jokes, insults, reactions, or pure
+  opinions. A reported claim must be a verifiable factual assertion. Do not
+  mention skipped question/reaction rows in any bucket.
+- Deduplicate near-identical claims. Prefer the clearest/high-engagement
+  representative row and mention other authors only if useful.
+- Report at most 8 claims. If there are many weak insufficient-evidence
+  rows, summarize that pattern instead of listing every row.
+- Classify each claim with exactly one label:
+  "Consistent with official/evidence sources",
+  "Contradicted by official/evidence sources", or
+  "Insufficient evidence".
+- Consistent/Contradicted claims must cite at least one evidence chunk inline.
+  If no chunk directly addresses the claim, use "Insufficient evidence".
+- If an evidence chunk supports the same broader factual assertion as a
+  Reddit row, classify that row as consistent even when wording differs.
+- For every Consistent/Contradicted claim, include both:
+  "Reddit claim: ..." and "Evidence says: ...". The evidence sentence must
+  summarize the official/evidence source's actual wording, not just say that
+  it supports or contradicts the claim.
+- Do not infer a citation from a Reddit row. Reddit rows identify claims and
+  authors; evidence chunks are the only source for official/evidence citations.
+- Do not use a deterministic table. Write a report with grouped bullets:
+  consistent claims, contradicted claims, insufficient-evidence claims.
 """
 
 
@@ -110,12 +178,37 @@ class ReportWriter:
         evidence_outs = _filter_outputs(execution, "evidence", EvidenceOutput)
         sql_outs = _filter_outputs(execution, "nl2sql", SQLOutput)
         kg_outs = _filter_outputs(execution, "kg", KGOutput)
+        failed = _failed_results(execution)
 
         # Hoist all citations even if the LLM omits them in prose
         for ev in evidence_outs:
             for chunk in ev.bundle.chunks:
                 report.citations.append(chunk.citation)
         report.citations = _dedupe_citations(report.citations)
+
+        if (_planned_branch(execution, "nl2sql") and not sql_outs
+                and _question_needs_sql(rq)):
+            report.markdown_body = (
+                "I couldn't answer the requested topic/count/emotion query "
+                "because the NL2SQL branch failed before returning rows. "
+                "The structured output includes the branch error; retry after "
+                "fixing that query path or ask for a graph-only view."
+            )
+            report.needs_human_review = True
+            report.notes.append("nl2sql_required_but_failed")
+            return report
+
+        if (_question_needs_sql(rq) and sql_outs
+                and not any(s.rows for s in sql_outs)):
+            report.markdown_body = (
+                "I ran the SQL query for this request, but it returned no "
+                "matching rows. I won't invent topics or counts; check the "
+                "structured SQL output for the exact filter that produced the "
+                "empty result."
+            )
+            report.needs_human_review = True
+            report.notes.append("nl2sql_empty_result")
+            return report
 
         if not (evidence_outs or sql_outs or kg_outs):
             report.markdown_body = (
@@ -125,9 +218,20 @@ class ReportWriter:
             report.notes.append("no_branch_output")
             return report
 
+        if kg_outs and not any(_kg_has_signal(k) for k in kg_outs):
+            report.notes.append("kg_empty_result")
+        if (_question_is_fact_check(rq) and sql_outs
+                and not any(s.rows for s in sql_outs)):
+            report.notes.append("fact_check_reddit_rows_empty")
+        if (_question_is_fact_check(rq) and evidence_outs
+                and not any(ev.bundle.chunks for ev in evidence_outs)):
+            report.notes.append("fact_check_official_chunks_empty")
+        if _question_is_topic_claim_audit(rq):
+            report.notes.append("topic_claim_audit")
+
         # Build the LLM payload
         user_payload = self._build_payload(
-            rq, execution, evidence_outs, sql_outs, kg_outs,
+            rq, execution, evidence_outs, sql_outs, kg_outs, failed,
         )
         try:
             data = self._call_llm(user_payload)
@@ -149,8 +253,17 @@ class ReportWriter:
             report.notes.append("empty_markdown_body")
             return report
 
-        # Post-process: swap raw topic/entity ids for human labels.
-        body = self._humanize_ids(body)
+        # Post-process: swap raw topic/entity ids for human labels unless the
+        # user explicitly requested those ids.
+        body = self._humanize_ids(
+            body,
+            preserve_topic_ids=_question_requests_id(rq, "topic_id"),
+            preserve_entity_ids=_question_requests_id(rq, "entity_id"),
+        )
+        body = _expand_inline_evidence_citations(body, evidence_outs)
+        body = _apply_fact_check_data_guards(
+            body, rq, evidence_outs, sql_outs,
+        )
 
         report.markdown_body = body
         for n in numbers_raw:
@@ -183,8 +296,26 @@ class ReportWriter:
         evidence_outs: list[EvidenceOutput],
         sql_outs: list[SQLOutput],
         kg_outs: list[KGOutput],
+        failed: list[Any],
     ) -> str:
         sections: list[str] = [f"User question: {rq.original}"]
+        fact_check = _question_is_fact_check(rq)
+        claim_audit = _question_is_topic_claim_audit(rq)
+
+        if fact_check:
+            sections.append(
+                "Fact-check mode: write a report-style answer with an explicit "
+                "official-source verdict. Use only evidence chunks for "
+                "official verification and only non-empty SQL rows for Reddit "
+                "corroboration."
+            )
+        if claim_audit:
+            sections.append(
+                "Topic claim audit mode: extract claims only from Reddit SQL "
+                "rows. For each claim, include author and post_id, classify it "
+                "as consistent, contradicted, or insufficient evidence, and "
+                "cite evidence chunk_ids for any official/evidence judgment."
+            )
 
         if rq.subtasks:
             sections.append("Subtasks:")
@@ -194,14 +325,38 @@ class ReportWriter:
                     f"[branches: {','.join(s.suggested_branches) or 'auto'}]"
                 )
 
+        evidence_chunk_count = sum(
+            len(ev.bundle.chunks) for ev in evidence_outs
+        )
+        if fact_check or claim_audit:
+            sections.append(
+                f"Official evidence availability: {evidence_chunk_count} "
+                "retrieved chunk(s)."
+            )
+
         if evidence_outs:
             sections.append("Evidence chunks:")
+            evidence_cap = 12 if claim_audit else 8
             for ev in evidence_outs:
-                for c in ev.bundle.chunks[:8]:
+                for c in ev.bundle.chunks[:evidence_cap]:
                     sections.append(
-                        f"  - [{c.chunk_id}] ({c.citation.source}): "
-                        f"{c.text[:300]}"
+                        f"  - evidence_id={c.chunk_id}; "
+                        f"source={c.citation.source}; "
+                        f"domain={c.citation.domain}; "
+                        f"title={c.citation.title!r}; "
+                        f"url={c.citation.url}; "
+                        f"publish_date={c.citation.publish_date}; "
+                        f"text={c.text[:500]}"
                     )
+
+        if failed:
+            sections.append("Branch failures:")
+            for f in failed:
+                sections.append(
+                    f"  - {f.invocation.branch}: "
+                    f"{f.status.error_kind or 'error'} "
+                    f"{(f.status.error or '')[:200]}"
+                )
 
         if sql_outs:
             sections.append("SQL outputs:")
@@ -216,11 +371,22 @@ class ReportWriter:
                     f"  - SQL: {s.final_sql}"
                 )
                 if s.rows:
-                    sample = s.rows[:5]
+                    row_cap = 20
+                    sample = s.rows[:row_cap]
                     sections.append(
-                        f"    rows ({len(s.rows)} total, showing up to 5): "
-                        f"{json.dumps(sample, default=str)[:600]}"
+                        f"    rows ({len(s.rows)} total, showing up to "
+                        f"{row_cap}): "
+                        f"{json.dumps(sample, default=str)[:12000]}"
                     )
+                else:
+                    sections.append(
+                        "    rows (0 total): []"
+                    )
+                    if fact_check or claim_audit:
+                        sections.append(
+                            "    Reddit/community availability: no matching "
+                            "rows were retrieved for this SQL output."
+                        )
 
         if kg_outs:
             sections.append("Graph outputs:")
@@ -239,12 +405,29 @@ class ReportWriter:
                         f"    nodes: {json.dumps(sample, default=str)[:600]}"
                     )
                 if k.edges:
-                    edge_sample = [
-                        f"{e.source_id} --{e.rel_type}--> {e.target_id}"
-                        for e in k.edges[:8]
-                    ]
+                    if k.query_kind == "reply_chains":
+                        node_lookup = {n.id: n for n in k.nodes}
+                        edge_sample = []
+                        for e in k.edges[:12]:
+                            src = node_lookup.get(e.source_id)
+                            dst = node_lookup.get(e.target_id)
+                            if src and dst:
+                                edge_sample.append(
+                                    f"{_node_excerpt(src)} replied to "
+                                    f"{_node_excerpt(dst)}"
+                                )
+                            else:
+                                edge_sample.append(
+                                    f"{e.source_id} --{e.rel_type}--> "
+                                    f"{e.target_id}"
+                                )
+                    else:
+                        edge_sample = [
+                            f"{e.source_id} --{e.rel_type}--> {e.target_id}"
+                            for e in k.edges[:8]
+                        ]
                     sections.append(
-                        "    edges: " + "; ".join(edge_sample)
+                        "    edges: " + "; ".join(edge_sample)[:2400]
                     )
 
         return "\n".join(sections)
@@ -252,19 +435,24 @@ class ReportWriter:
     def _call_llm(self, user_payload: str) -> dict:
         resp = self._client.chat.completions.create(
             model=self._model,
-            max_tokens=900,
+            max_tokens=3000,
             temperature=0.0,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": _WRITER_SYSTEM},
-                {"role": "user", "content": user_payload[:8000]},
+                {"role": "user", "content": user_payload[:16000]},
             ],
         )
         raw = (resp.choices[0].message.content or "{}").strip()
         return json.loads(raw)
 
     @staticmethod
-    def _humanize_ids(body: str) -> str:
+    def _humanize_ids(
+        body: str,
+        *,
+        preserve_topic_ids: bool = False,
+        preserve_entity_ids: bool = False,
+    ) -> str:
         """Replace raw `topic_*` / `ent_*` ids with their PG label / name.
 
         Best-effort: if Postgres is unreachable, return the original body
@@ -293,7 +481,8 @@ class ReportWriter:
                     for row in cur.fetchall():
                         label = (row.get("label") or "").strip()
                         if label:
-                            replacements[row["topic_id"]] = label
+                            if not preserve_topic_ids:
+                                replacements[row["topic_id"]] = label
                 if entity_ids:
                     cur.execute(
                         "SELECT entity_id, name FROM entities_v2 "
@@ -303,7 +492,8 @@ class ReportWriter:
                     for row in cur.fetchall():
                         name = (row.get("name") or "").strip()
                         if name:
-                            replacements[row["entity_id"]] = name
+                            if not preserve_entity_ids:
+                                replacements[row["entity_id"]] = name
         except Exception as exc:
             log.warning("report_writer.humanize_ids_error",
                         error=str(exc)[:120])
@@ -316,11 +506,15 @@ class ReportWriter:
             rid = match.group(0)
             return replacements.get(rid, rid)
 
-        body = _TOPIC_ID_RE.sub(_sub, body)
-        body = _ENTITY_ID_RE.sub(_sub, body)
+        if not preserve_topic_ids:
+            body = _TOPIC_ID_RE.sub(_sub, body)
+        if not preserve_entity_ids:
+            body = _ENTITY_ID_RE.sub(_sub, body)
         # Strip cosmetic prefixes like "Topic ID: <label>" -> "<label>"
-        body = re.sub(r"\bTopic ID:\s*", "", body)
-        body = re.sub(r"\bEntity ID:\s*", "", body)
+        if not preserve_topic_ids:
+            body = re.sub(r"\bTopic ID:\s*", "", body)
+        if not preserve_entity_ids:
+            body = re.sub(r"\bEntity ID:\s*", "", body)
         return body
 
     @staticmethod
@@ -354,6 +548,159 @@ def _filter_outputs(execution: PlanExecutionV2, branch: str, model_cls):
         except Exception:
             continue
     return out
+
+
+def _failed_results(execution: PlanExecutionV2):
+    return [r for r in execution.results if not r.status.success]
+
+
+def _planned_branch(execution: PlanExecutionV2, branch: str) -> bool:
+    return any(inv.branch == branch for inv in execution.workflow)
+
+
+def _question_needs_sql(rq: RewrittenQuery) -> bool:
+    sql_intents = {
+        "community_count", "community_listing", "trend",
+        "topic_claim_audit",
+    }
+    if any(s.intent in sql_intents for s in rq.subtasks):
+        return True
+    text = (rq.original or "").lower()
+    return any(k in text for k in (
+        "topic", "topics", "count", "counts", "emotion", "sentiment",
+        "post count", "dominant emotion",
+    ))
+
+
+def _question_is_fact_check(rq: RewrittenQuery) -> bool:
+    if any(s.intent == "topic_claim_audit" for s in rq.subtasks):
+        return False
+    if any(s.intent == "fact_check" for s in rq.subtasks):
+        return True
+    text = " ".join([rq.original] + [s.text for s in rq.subtasks]).lower()
+    return any(k in text for k in (
+        "fact-check", "fact check", "verify", "verification",
+        "official source", "official sources", "claim", "true or false",
+        "真假", "真伪", "核实", "事实核查", "官方来源", "官方说法",
+    ))
+
+
+def _question_is_topic_claim_audit(rq: RewrittenQuery) -> bool:
+    if any(s.intent == "topic_claim_audit" for s in rq.subtasks):
+        return True
+    text = " ".join([rq.original] + [s.text for s in rq.subtasks]).lower()
+    has_claims = (
+        "claim" in text or "claims" in text
+        or "说法" in text or "观点" in text
+    )
+    has_topic = "topic" in text or "主题" in text
+    has_official = (
+        "official" in text or "evidence" in text
+        or "官方" in text or "证据" in text
+    )
+    has_buckets = any(k in text for k in (
+        "consistent", "contradict", "insufficient",
+        "agree", "conflict", "一致", "矛盾", "证据不足", "无法判断",
+    ))
+    return has_claims and has_topic and has_official and has_buckets
+
+
+def _question_requests_id(rq: RewrittenQuery, field_name: str) -> bool:
+    text = " ".join([rq.original] + [s.text for s in rq.subtasks]).lower()
+    return field_name.lower() in text
+
+
+def _kg_has_signal(k: KGOutput) -> bool:
+    if k.nodes or k.edges:
+        return True
+    return any(v not in (0, 0.0, None, "", [], {}) for v in k.metrics.values())
+
+
+def _node_excerpt(node: Any) -> str:
+    props = getattr(node, "properties", {}) or {}
+    author = props.get("author") or props.get("author_id") or node.id
+    text = (props.get("text") or "").strip()
+    if len(text) > 90:
+        text = text[:87] + "..."
+    if text:
+        return f"{author} (\"{text}\")"
+    return str(author)
+
+
+def _apply_fact_check_data_guards(
+    body: str,
+    rq: RewrittenQuery,
+    evidence_outs: list[EvidenceOutput],
+    sql_outs: list[SQLOutput],
+) -> str:
+    if not _question_is_fact_check(rq):
+        return body
+
+    additions: list[str] = []
+    if evidence_outs and not any(ev.bundle.chunks for ev in evidence_outs):
+        additions.append(
+            "Official-source check: no official-source evidence chunks were "
+            "retrieved, so the claim cannot be verified from official sources "
+            "in this run."
+        )
+    if sql_outs and not any(s.rows for s in sql_outs):
+        additions.append(
+            "Reddit/community check: SQL returned 0 matching rows, so no "
+            "matching Reddit posts or comments were retrieved in this run."
+        )
+
+    if not additions:
+        return body
+
+    lower_body = body.lower()
+    missing = [
+        line for line in additions
+        if line.lower()[:48] not in lower_body
+    ]
+    if not missing:
+        return body
+    return body.rstrip() + "\n\n" + "\n".join(missing)
+
+
+def _expand_inline_evidence_citations(
+    body: str,
+    evidence_outs: list[EvidenceOutput],
+) -> str:
+    chunks: dict[str, Any] = {}
+    for ev in evidence_outs:
+        for c in ev.bundle.chunks:
+            chunks[c.chunk_id] = c
+    if not chunks:
+        return body
+
+    def _replace(match: "re.Match") -> str:
+        chunk_id = match.group(1)
+        chunk = chunks.get(chunk_id)
+        if chunk is None:
+            return match.group(0)
+        citation = chunk.citation
+        title = citation.title or chunk.text[:80]
+        source = citation.source or citation.domain or "evidence"
+        date = ""
+        if citation.publish_date:
+            try:
+                date = citation.publish_date.date().isoformat()
+            except Exception:
+                date = str(citation.publish_date)[:10]
+        parts = [source, f"\"{title}\""]
+        if date:
+            parts.append(date)
+        if citation.url:
+            parts.append(citation.url)
+        return "(Evidence: " + ", ".join(parts) + ")"
+
+    return re.sub(
+        r"\[(?:chunk_id|evidence_id|source_ref)?\s*[:=]?\s*"
+        r"((?:[0-9a-f]{12,}|c[\w:-]*|ev[\w:-]*|chunk_[\w:-]+))\]",
+        _replace,
+        body,
+        flags=re.IGNORECASE,
+    )
 
 
 def _dedupe_citations(items: list[Citation]) -> list[Citation]:

@@ -24,6 +24,7 @@ Backwards compatibility:
 from __future__ import annotations
 
 import uuid
+import re
 from typing import Any, Optional
 
 import structlog
@@ -79,17 +80,30 @@ class ChatOrchestrator:
     # ── Public ───────────────────────────────────────────────────────────────
 
     def handle(self, session_id: str, message: str) -> ChatResponse:
+        from services.metrics import metrics, timing
+        metrics.inc("chat.calls")
+
         state = session_store.load(session_id or _new_session_id())
         session_store.append_turn(state, role="user", content=message)
 
         # 1. Rewrite + subtask split
-        rq = self._rewriter.rewrite(message, state)
+        with timing("rewriter.latency_ms"):
+            rq = self._rewriter.rewrite(message, state)
+        metrics.observe("rewriter.subtasks", len(rq.subtasks))
 
         # 2. Plan + execute branch DAG
-        execution = self._planner.plan_and_execute(rq)
+        with timing("planner.latency_ms"):
+            execution = self._planner.plan_and_execute(rq)
+        metrics.observe("planner.branches", len(execution.branches_used))
 
         # 3. Compose + Critic loop (single retry)
-        report, verdict = self._compose_with_critic(rq, execution)
+        with timing("compose_with_critic.latency_ms"):
+            report, verdict = self._compose_with_critic(rq, execution)
+        metrics.inc("critic.verdict",
+                    labels={"passed": str(verdict.passed).lower()})
+        if verdict.error_kind:
+            metrics.inc("critic.error_kind",
+                        labels={"kind": verdict.error_kind})
 
         # 4. Reflection (audit + auto-removal)
         # Phase 5.2: install a real ablation runner scoped to this turn.
@@ -185,7 +199,7 @@ class ChatOrchestrator:
         for sub in rq.subtasks:
             if sub.targets.run_id:
                 state.current_run_id = sub.targets.run_id
-            if sub.targets.topic_id:
+            if sub.targets.topic_id and _looks_like_topic_id(sub.targets.topic_id):
                 state.current_topic_id = sub.targets.topic_id
             if sub.targets.claim_id:
                 state.current_claim_id = sub.targets.claim_id
@@ -200,10 +214,21 @@ def _new_session_id() -> str:
 def _branch_outputs_payload(execution: PlanExecutionV2) -> dict[str, Any]:
     """Group branch outputs by branch name for UI rendering."""
     grouped: dict[str, list[Any]] = {}
+    errors: dict[str, list[Any]] = {}
     for r in execution.results:
-        if not r.status.success or r.output is None:
+        if not r.status.success:
+            errors.setdefault(r.invocation.branch, []).append({
+                "branch": r.invocation.branch,
+                "error": r.status.error,
+                "error_kind": r.status.error_kind,
+                "payload": r.invocation.payload,
+            })
+            continue
+        if r.output is None:
             continue
         grouped.setdefault(r.invocation.branch, []).append(r.output)
+    if errors:
+        grouped["_errors"] = errors
     return grouped
 
 
@@ -215,16 +240,23 @@ def _legacy_capability_output(execution: PlanExecutionV2) -> dict[str, Any]:
     branch's output under `primary` and the rest under `aux_outputs`.
     """
     grouped = _branch_outputs_payload(execution)
-    if not grouped:
+    errors = grouped.pop("_errors", None)
+    if not grouped and not errors:
         return {}
     # Pick a primary branch deterministically (first in execution.branches_used)
     primary = execution.branches_used[0] if execution.branches_used else None
     payload: dict[str, Any] = {
         "branches_used": list(execution.branches_used),
     }
+    if errors:
+        payload["branch_errors"] = errors
     if primary and primary in grouped and grouped[primary]:
         payload["primary"] = grouped[primary][0]
     aux = {k: v for k, v in grouped.items() if k != primary}
     if aux:
         payload["aux_outputs"] = aux
     return payload
+
+
+def _looks_like_topic_id(value: str) -> bool:
+    return bool(re.match(r"^topic_[A-Za-z0-9]+$", value or ""))

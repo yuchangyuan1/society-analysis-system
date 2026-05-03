@@ -220,6 +220,38 @@ def test_nl2sql_success_path(monkeypatch):
     assert out.attempts[0].error is None
 
 
+def test_nl2sql_retrieves_chroma2_guidance_without_exposing_it(monkeypatch):
+    memory = MagicMock()
+    memory.count_guidance.return_value = 5
+    memory.recall_guidance.return_value = [{
+        "id": "guide::broad_topic_listing",
+        "document": "Rule: list topics should not filter to one topic_id.",
+        "metadata": {"kind": "guide"},
+    }]
+    memory.recall_schema.return_value = []
+    memory.recall_success.return_value = []
+    memory.recall_errors.return_value = []
+    embeddings = MagicMock()
+    embeddings.embed.return_value = [0.0] * 8
+    client = _mock_openai(json.dumps({"sql": "SELECT 1"}))
+
+    tool = NL2SQLTool(
+        memory=memory,
+        embeddings=embeddings,
+        client=client,
+    )
+
+    def _ok_execute(self, sql):
+        return [{"x": 1}], ["x"]
+
+    monkeypatch.setattr(NL2SQLTool, "_execute", _ok_execute)
+    out = tool.answer("List the topics from today's worldnews data")
+    messages = client.chat.completions.create.call_args.kwargs["messages"]
+    assert "NL2SQL guidance from Chroma 2" in messages[1]["content"]
+    assert "list topics should not filter" in messages[1]["content"]
+    assert "used_guidance" not in out.model_dump()
+
+
 def test_nl2sql_flags_empty_result():
     memory = MagicMock()
     memory.recall_schema.return_value = []

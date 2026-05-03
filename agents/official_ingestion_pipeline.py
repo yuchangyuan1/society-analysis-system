@@ -323,8 +323,15 @@ class OfficialIngestionPipeline:
 
     # ── Chroma 1 upsert ──────────────────────────────────────────────────────
 
-    def _upsert_to_chroma(self, chunks: list[OfficialChunk]) -> int:
-        """Embed and upsert OfficialChunks into the chroma_official collection."""
+    def _upsert_to_chroma(
+        self, chunks: list[OfficialChunk],
+        run_id: str = "official_ingest",
+    ) -> int:
+        """Embed and upsert OfficialChunks into the chroma_official collection.
+
+        `run_id` is recorded as `source_run_id` metadata so we can roll
+        back / inspect by ingestion run later.
+        """
         if not self._write_chroma or not chunks or self._chroma is None:
             return 0
         try:
@@ -344,6 +351,7 @@ class OfficialIngestionPipeline:
                                       if c.publish_date else ""),
                     "chunk_index": c.chunk_index,
                     "topic_hint": c.topic_hint or "",
+                    "source_run_id": run_id,
                 })
             self._chroma.official.upsert(
                 ids=ids, embeddings=embeddings, documents=texts,
@@ -351,6 +359,13 @@ class OfficialIngestionPipeline:
             )
             for c in chunks:
                 c.embedded = True
+            # Production hardening Day 1: invalidate the BM25 index cache
+            # so subsequent retrievals see the new corpus.
+            try:
+                from services.bm25_cache import bump_corpus_version
+                bump_corpus_version()
+            except Exception:
+                pass
             return len(chunks)
         except Exception as exc:
             log.error("official.chroma_upsert_error",

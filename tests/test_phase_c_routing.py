@@ -25,6 +25,7 @@ from models.query import RewrittenQuery, Subtask, SubtaskTarget
 # ── Branch routing per intent ────────────────────────────────────────────────
 
 @pytest.mark.parametrize("intent, expected", [
+    ("topic_claim_audit",   ["nl2sql", "evidence"]),
     ("propagation_trace",   ["kg"]),
     ("influencer_query",    ["kg", "nl2sql"]),
     ("coordination_check",  ["kg"]),

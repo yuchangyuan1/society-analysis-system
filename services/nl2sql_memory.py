@@ -7,6 +7,7 @@ three kinds of documents identified by `metadata.kind`:
     kind=schema     - per-column descriptions written by Schema-aware Agent
     kind=success    - successful (NL, SQL) exemplars
     kind=error      - error patterns to avoid (auto-curated by Reflection)
+    kind=guide      - durable NL2SQL rules / database notes / operator guidance
 
 Conflict-replacement policy (Q11=B; PROJECT_REDESIGN_V2.md 7c-H):
     similarity < 0.92                 -> append (no conflict check)
@@ -35,7 +36,7 @@ from services.chroma_collections import ChromaCollections
 log = structlog.get_logger(__name__)
 
 
-Kind = Literal["schema", "success", "error"]
+Kind = Literal["schema", "success", "error", "guide"]
 
 
 # ── Document shape ───────────────────────────────────────────────────────────
@@ -133,6 +134,34 @@ class NL2SQLMemory:
         }
         return self._upsert_with_conflict_check(text, embedding, meta)
 
+    def upsert_guidance(
+        self,
+        rule_id: str,
+        text: str,
+        embedding: list[float],
+        category: str = "rule",
+        priority: int = 50,
+    ) -> str:
+        """Store durable NL2SQL guidance in Chroma 2 with a stable id."""
+        safe_rule_id = "".join(
+            ch if ch.isalnum() or ch in ("_", "-") else "_"
+            for ch in rule_id.strip().lower()
+        ) or "unnamed"
+        record_id = f"guide::{safe_rule_id}"
+        meta = {
+            "kind": "guide",
+            "category": category,
+            "priority": int(priority),
+            "updated_at": time.time(),
+        }
+        self._cols.nl2sql.upsert(
+            ids=[record_id],
+            embeddings=[embedding],
+            documents=[text],
+            metadatas=[meta],
+        )
+        return record_id
+
     # ── Retrieval ──────────────────────────────────────────────────────────────
 
     def recall_schema(
@@ -153,6 +182,13 @@ class NL2SQLMemory:
     def recall_errors(self, embedding: list[float],
                       n_results: int = 3) -> list[dict]:
         return self._recall_with_hit(embedding, "error", n_results)
+
+    def recall_guidance(self, embedding: list[float],
+                        n_results: int = 8) -> list[dict]:
+        return self._recall_with_hit(embedding, "guide", n_results)
+
+    def count_guidance(self) -> int:
+        return self._cols.nl2sql.count(where={"kind": "guide"})
 
     # ── Auto-curation hooks ────────────────────────────────────────────────────
 

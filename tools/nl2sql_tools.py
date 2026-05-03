@@ -94,6 +94,8 @@ You will be given:
 
 Rules:
 - Output ONLY one SELECT query (or a CTE WITH ... SELECT). No semicolons.
+- Treat "NL2SQL guidance from Chroma 2" as durable operating guidance.
+  Follow it unless it conflicts with read-only SQL safety rules.
 - Use only the tables and columns explicitly listed in schema hints.
 - For free-text matching on posts.text use the existing tsvector via
   `text_tsv @@ plainto_tsquery('english', '...')`. Avoid LIKE on huge text.
@@ -108,13 +110,38 @@ Rules:
   but never alone unless the user explicitly asked "what is the id of ...".
 - "What topics are trending" -> SELECT label, post_count FROM topics_v2
   ORDER BY post_count DESC.
+- When the user asks for post counts within a specific time/source/subreddit
+  window, count matching rows from posts_v2 (COUNT(*)) after applying those
+  filters. Do not use topics_v2.post_count unless the user asks for all-time
+  topic totals.
+- When the user asks for dominant emotion within a specific
+  time/source/subreddit window, compute it from matching posts_v2 rows with
+  mode() WITHIN GROUP (ORDER BY posts_v2.dominant_emotion). Do not use
+  topics_v2.dominant_emotion unless the user asks for the topic-level total.
+
+Freshness rules (production hardening):
+- DEFAULT time window when the user input mentions "trend",
+  "trending", "propagation", "amplify", "spread", "viral", "today",
+  "this week", or similar present-tense framing:
+      WHERE posts_v2.posted_at >= NOW() - INTERVAL '30 days'
+  Apply this even if not explicitly asked - users expect "recent".
+- DO NOT apply the default window for fact-check / official-source
+  recap / historical questions ("what did X say in March", "all-time
+  most influential", "since the recall").
+- If the user explicitly says "last week" / "in the past 7 days" /
+  "last month", honour their range exactly.
+- If the user says "all time" / "since the beginning", omit the WHERE
+  clause entirely.
 
 Topic filtering rules (read carefully -- this is where most NL2SQL errors come from):
-- If the user prompt provides "Pre-resolved topic_ids", USE THEM as the
-  filter and IGNORE label matching entirely:
+- If the user prompt provides "Pre-resolved topic_ids" and the question is
+  about one named topic, USE THEM as the filter and IGNORE label matching:
       WHERE posts_v2.topic_id IN ('topic_xxx', 'topic_yyy')
   These ids were chosen by an embedding-based semantic match, so they
   already cover the user's topic phrase even if the label text differs.
+- If the user asks to list all topics / today's topics / topics from a
+  subreddit or corpus, DO NOT narrow the query to a single pre-resolved
+  topic_id. Return all matching topics for the requested time/source window.
 - Otherwise, when the user names a topic by exact label, JOIN on topic_id:
       SELECT posts_v2.text, posts_v2.author, posts_v2.dominant_emotion
       FROM posts_v2
@@ -133,6 +160,96 @@ Respond as JSON: {"sql": "..."}.
 """
 
 
+_BUILTIN_GUIDANCE: list[tuple[str, str, str, int]] = [
+    (
+        "db_intro_core_tables",
+        "Database guide: posts_v2 stores community posts and comments. "
+        "Use posts_v2.posted_at for time windows, posts_v2.subreddit for "
+        "subreddit filters, and posts_v2.source only for platform filters "
+        "(the social platform is reddit), "
+        "posts_v2.topic_id to join topics_v2, and posts_v2.author for the "
+        "human-readable account. topics_v2 stores topic_id, label, "
+        "post_count, dominant_emotion, and centroid_text. entities_v2 stores "
+        "entity_id, name, entity_type. Join through topic_id/entity_id rather "
+        "than guessing labels from post text.",
+        "database",
+        100,
+    ),
+    (
+        "reddit_source_vs_subreddit",
+        "Rule: source and subreddit are different. For a question about "
+        "worldnews/conspiracy/politics/etc., filter posts_v2.subreddit = "
+        "'worldnews' (or the named subreddit). Do not write "
+        "posts_v2.source = 'worldnews'; source should be the platform "
+        "value 'reddit'.",
+        "rule",
+        100,
+    ),
+    (
+        "broad_topic_listing_no_topic_hint",
+        "Rule: for questions like 'list the topics', 'all topics', "
+        "'today's worldnews topics', or requests for topic_id, label, post "
+        "count, emotion, do not filter to a single pre-resolved topic_id. "
+        "Use EXISTS or a join to posts_v2 only to enforce the requested "
+        "time/source window. Return topics_v2.topic_id and topics_v2.label.",
+        "rule",
+        100,
+    ),
+    (
+        "filtered_topic_post_count_from_posts",
+        "Rule: if the user asks for post count while also specifying a "
+        "time window, subreddit, or source corpus (for example today's "
+        "worldnews data), the post count must be COUNT(*) over matching "
+        "posts_v2 rows after those filters. Do not return topics_v2.post_count "
+        "for that column; topics_v2.post_count is the broader topic total.",
+        "rule",
+        100,
+    ),
+    (
+        "filtered_topic_dominant_emotion_from_posts",
+        "Rule: if the user asks for dominant emotion while also specifying "
+        "a time window, subreddit, or source corpus, compute dominant_emotion "
+        "from the matching posts_v2 rows after those filters. Use "
+        "COALESCE(mode() WITHIN GROUP (ORDER BY p.dominant_emotion), "
+        "'Not specified') AS dominant_emotion. Do not return "
+        "topics_v2.dominant_emotion for that filtered column.",
+        "rule",
+        100,
+    ),
+    (
+        "topic_id_requested_preserve_id",
+        "Rule: when the user explicitly asks for topic_id, include the raw "
+        "topics_v2.topic_id in the SELECT list and include topics_v2.label "
+        "alongside it. Do not replace topic_id with the label in SQL output.",
+        "rule",
+        95,
+    ),
+    (
+        "topic_specific_queries_use_resolved_ids",
+        "Rule: when the question is about one specific named topic and "
+        "Pre-resolved topic_ids are supplied, filter posts_v2.topic_id or "
+        "topics_v2.topic_id with IN (...). Do not use LIKE on post text to "
+        "match topic labels.",
+        "rule",
+        90,
+    ),
+    (
+        "today_worldnews_window",
+        "Example: List the topics from today's worldnews data with topic_id, "
+        "label, post count, and dominant emotion. SQL shape: SELECT "
+        "t.topic_id, t.label, COUNT(*) AS post_count, "
+        "COALESCE(mode() WITHIN GROUP (ORDER BY p.dominant_emotion), "
+        "'Not specified') AS dominant_emotion "
+        "FROM posts_v2 p JOIN topics_v2 t ON p.topic_id = t.topic_id "
+        "WHERE p.posted_at >= NOW() - INTERVAL '1 day' "
+        "AND p.subreddit = 'worldnews' GROUP BY t.topic_id, t.label "
+        "ORDER BY post_count DESC LIMIT 100",
+        "example",
+        90,
+    ),
+]
+
+
 # ── Service ──────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -145,6 +262,7 @@ class NL2SQLTool:
     statement_timeout_ms: int = NL2SQL_STATEMENT_TIMEOUT_MS
     max_repair_rounds: int = NL2SQL_MAX_REPAIR_ROUNDS
     readonly_dsn: Optional[str] = None
+    ensure_builtin_guidance: bool = True
 
     def __post_init__(self) -> None:
         self.memory = self.memory or NL2SQLMemory()
@@ -170,7 +288,9 @@ class NL2SQLTool:
             return out
 
         # 1. Recall context from Chroma 2
+        self._ensure_builtin_guidance()
         embedding = self.embeddings.embed(nl_query)
+        guidance_hits = self.memory.recall_guidance(embedding, n_results=8)
         schema_hits = self.memory.recall_schema(embedding, n_results=8)
         success_hits = self.memory.recall_success(embedding, n_results=5)
         error_hits = self.memory.recall_errors(embedding, n_results=3)
@@ -180,7 +300,7 @@ class NL2SQLTool:
         out.used_error_lessons = [h["id"] for h in error_hits]
 
         prompt_user = self._build_user_prompt(
-            nl_query, schema_hits, success_hits, error_hits,
+            nl_query, guidance_hits, schema_hits, success_hits, error_hits,
             topic_id_hints=topic_id_hints,
         )
 
@@ -233,6 +353,16 @@ class NL2SQLTool:
                 continue
 
         out.elapsed_ms = int((time.monotonic() - t0) * 1000)
+        # Day 8 metrics
+        try:
+            from services.metrics import metrics
+            metrics.inc("nl2sql.calls",
+                        labels={"success": str(out.success).lower()})
+            metrics.observe("nl2sql.repair_rounds", len(out.attempts) - 1)
+            metrics.observe("nl2sql.latency_ms", out.elapsed_ms)
+            metrics.observe("nl2sql.rows_returned", len(out.rows))
+        except Exception:
+            pass
         log.info("nl2sql.answer_done",
                  nl=nl_query[:60],
                  success=out.success,
@@ -250,6 +380,7 @@ class NL2SQLTool:
 
     def _build_user_prompt(
         self, nl_query: str,
+        guidance_hits: list[dict],
         schema_hits: list[dict],
         success_hits: list[dict],
         error_hits: list[dict],
@@ -269,6 +400,10 @@ class NL2SQLTool:
                 "Pre-resolved topic_ids (use these instead of label matching):"
             )
             sections.extend(hint_lines)
+        if guidance_hits:
+            sections.append("NL2SQL guidance from Chroma 2:")
+            for h in guidance_hits:
+                sections.append(f"  - {h.get('document', '')}")
         if schema_hits:
             sections.append("Schema hints:")
             for h in schema_hits:
@@ -282,6 +417,32 @@ class NL2SQLTool:
             for h in error_hits:
                 sections.append(f"  - {h.get('document', '')}")
         return "\n".join(sections)
+
+    def _ensure_builtin_guidance(self) -> None:
+        """Seed durable NL2SQL operating rules into Chroma 2 if missing."""
+        if not self.ensure_builtin_guidance:
+            return
+        try:
+            if self.memory.count_guidance() >= len(_BUILTIN_GUIDANCE):
+                return
+        except Exception as exc:
+            log.warning("nl2sql.guidance_count_failed",
+                        error=str(exc)[:120])
+            return
+
+        for rule_id, text, category, priority in _BUILTIN_GUIDANCE:
+            try:
+                self.memory.upsert_guidance(
+                    rule_id=rule_id,
+                    text=text,
+                    embedding=self.embeddings.embed(text),
+                    category=category,
+                    priority=priority,
+                )
+            except Exception as exc:
+                log.warning("nl2sql.guidance_seed_failed",
+                            rule_id=rule_id,
+                            error=str(exc)[:120])
 
     def _llm_generate(
         self,

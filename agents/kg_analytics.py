@@ -35,10 +35,17 @@ log = structlog.get_logger(__name__)
 # ── Subgraph extraction ──────────────────────────────────────────────────────
 
 def _account_reply_graph(
-    kuzu: KuzuService, topic_id: Optional[str] = None,
+    kuzu: KuzuService,
+    topic_id: Optional[str] = None,
+    since_days: Optional[int] = None,
 ) -> tuple[Any, dict]:
     """Build a NetworkX DiGraph where nodes are Account ids and an edge
     A -> B means an account A wrote a Post that replied to a Post by B.
+
+    `since_days` filters the underlying Posts to the last N days using
+    `posts_v2.posted_at` (PostgreSQL is source of truth for posted_at;
+    Kuzu doesn't store the timestamp, so we resolve the post id whitelist
+    via PG and pass it as a Cypher param).
 
     Returns (graph, metadata). When networkx is unavailable, returns
     (None, {"reason": ...}).
@@ -48,28 +55,71 @@ def _account_reply_graph(
     except ImportError:
         return None, {"reason": "networkx_missing"}
 
-    cache_key = ("account_reply_graph", topic_id or "ALL")
+    cache_key = ("account_reply_graph", topic_id or "ALL", since_days or 0)
     cached = SUBGRAPH_CACHE.get(cache_key)
     if cached is not None:
         return cached, {"cache_hit": True}
 
+    # Optional posted_at filter: resolve the eligible post id set in PG
+    eligible_post_ids: Optional[list[str]] = None
+    if since_days and since_days > 0:
+        try:
+            from services.postgres_service import PostgresService
+            pg = PostgresService(); pg.connect()
+            with pg.cursor() as cur:
+                cur.execute(
+                    "SELECT post_id FROM posts_v2 "
+                    "WHERE posted_at >= NOW() - (%s || ' days')::interval",
+                    (str(since_days),),
+                )
+                eligible_post_ids = [r["post_id"] for r in (cur.fetchall() or [])]
+        except Exception as exc:
+            log.warning("kg_analytics.freshness_resolve_failed",
+                        error=str(exc)[:160])
+            eligible_post_ids = None
+
     if topic_id:
-        cypher = (
-            "MATCH (ac:Account)-[:Posted]->(c:Post)-[:Replied]->(p:Post)"
-            "<-[:Posted]-(ap:Account), "
-            "      (c)-[:BelongsToTopic]->(t:Topic {id: $tid}) "
-            "RETURN ac.id AS child_account, ap.id AS parent_account, "
-            "       count(*) AS weight"
-        )
-        rows = kuzu._safe_execute(cypher, {"tid": topic_id}) or []  # type: ignore[attr-defined]
+        if eligible_post_ids is not None:
+            cypher = (
+                "MATCH (ac:Account)-[:Posted]->(c:Post)-[:Replied]->(p:Post)"
+                "<-[:Posted]-(ap:Account), "
+                "      (c)-[:BelongsToTopic]->(t:Topic {id: $tid}) "
+                "WHERE c.id IN $pids "
+                "RETURN ac.id AS child_account, ap.id AS parent_account, "
+                "       count(*) AS weight"
+            )
+            rows = kuzu._safe_execute(  # type: ignore[attr-defined]
+                cypher, {"tid": topic_id, "pids": eligible_post_ids},
+            ) or []
+        else:
+            cypher = (
+                "MATCH (ac:Account)-[:Posted]->(c:Post)-[:Replied]->(p:Post)"
+                "<-[:Posted]-(ap:Account), "
+                "      (c)-[:BelongsToTopic]->(t:Topic {id: $tid}) "
+                "RETURN ac.id AS child_account, ap.id AS parent_account, "
+                "       count(*) AS weight"
+            )
+            rows = kuzu._safe_execute(cypher, {"tid": topic_id}) or []  # type: ignore[attr-defined]
     else:
-        cypher = (
-            "MATCH (ac:Account)-[:Posted]->(c:Post)-[:Replied]->(p:Post)"
-            "<-[:Posted]-(ap:Account) "
-            "RETURN ac.id AS child_account, ap.id AS parent_account, "
-            "       count(*) AS weight"
-        )
-        rows = kuzu._safe_execute(cypher) or []  # type: ignore[attr-defined]
+        if eligible_post_ids is not None:
+            cypher = (
+                "MATCH (ac:Account)-[:Posted]->(c:Post)-[:Replied]->(p:Post)"
+                "<-[:Posted]-(ap:Account) "
+                "WHERE c.id IN $pids "
+                "RETURN ac.id AS child_account, ap.id AS parent_account, "
+                "       count(*) AS weight"
+            )
+            rows = kuzu._safe_execute(  # type: ignore[attr-defined]
+                cypher, {"pids": eligible_post_ids},
+            ) or []
+        else:
+            cypher = (
+                "MATCH (ac:Account)-[:Posted]->(c:Post)-[:Replied]->(p:Post)"
+                "<-[:Posted]-(ap:Account) "
+                "RETURN ac.id AS child_account, ap.id AS parent_account, "
+                "       count(*) AS weight"
+            )
+            rows = kuzu._safe_execute(cypher) or []  # type: ignore[attr-defined]
 
     g = nx.DiGraph()
     for r in rows:
@@ -80,7 +130,10 @@ def _account_reply_graph(
         g.add_edge(str(c), str(p), weight=int(r.get("weight", 1)))
 
     SUBGRAPH_CACHE.put(cache_key, g)
-    return g, {"cache_hit": False, "edge_count": g.number_of_edges()}
+    return g, {
+        "cache_hit": False, "edge_count": g.number_of_edges(),
+        "since_days": since_days,
+    }
 
 
 def _topic_post_reply_graph(
@@ -130,19 +183,22 @@ class KGAnalytics:
 
     def influencer_rank(
         self, topic_id: Optional[str] = None, top_k: int = 10,
+        since_days: Optional[int] = 30,
     ) -> KGOutput:
         """PageRank over the account-level reply graph.
 
         Higher rank = more accounts (transitively) reply to this account's
         posts. Replaces the naive `key_nodes` post_count ordering.
+        `since_days` defaults to 30 days (Day 7 freshness rule).
         """
         t0 = time.monotonic()
         out = KGOutput(query_kind="influencer_rank",
-                       target={"topic_id": topic_id, "top_k": top_k})
+                       target={"topic_id": topic_id, "top_k": top_k,
+                                "since_days": since_days})
         if not self.kuzu:
             out.elapsed_ms = int((time.monotonic() - t0) * 1000)
             return out
-        g, meta = _account_reply_graph(self.kuzu, topic_id)
+        g, meta = _account_reply_graph(self.kuzu, topic_id, since_days)
         if g is None or g.number_of_edges() == 0:
             out.metrics = {"node_count": 0, **meta}
             out.elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -174,7 +230,9 @@ class KGAnalytics:
 
     # ── bridge_accounts ──────────────────────────────────────────────────────
 
-    def bridge_accounts(self, top_k: int = 10) -> KGOutput:
+    def bridge_accounts(
+        self, top_k: int = 10, since_days: Optional[int] = 30,
+    ) -> KGOutput:
         """Betweenness centrality over the global account-reply graph.
 
         High betweenness = sits on many shortest paths between other
@@ -182,11 +240,12 @@ class KGAnalytics:
         """
         t0 = time.monotonic()
         out = KGOutput(query_kind="bridge_accounts",
-                       target={"top_k": top_k})
+                       target={"top_k": top_k, "since_days": since_days})
         if not self.kuzu:
             out.elapsed_ms = int((time.monotonic() - t0) * 1000)
             return out
-        g, meta = _account_reply_graph(self.kuzu, topic_id=None)
+        g, meta = _account_reply_graph(self.kuzu, topic_id=None,
+                                        since_days=since_days)
         if g is None or g.number_of_nodes() < 3:
             out.metrics = {"node_count": getattr(g, "number_of_nodes",
                                                   lambda: 0)(),
@@ -225,6 +284,7 @@ class KGAnalytics:
         self,
         topic_id: Optional[str] = None,
         min_size: int = 3,
+        since_days: Optional[int] = 30,
     ) -> KGOutput:
         """Louvain communities on the (undirected) account-reply graph.
 
@@ -234,11 +294,12 @@ class KGAnalytics:
         """
         t0 = time.monotonic()
         out = KGOutput(query_kind="coordinated_groups",
-                       target={"topic_id": topic_id, "min_size": min_size})
+                       target={"topic_id": topic_id, "min_size": min_size,
+                                "since_days": since_days})
         if not self.kuzu:
             out.elapsed_ms = int((time.monotonic() - t0) * 1000)
             return out
-        g, meta = _account_reply_graph(self.kuzu, topic_id)
+        g, meta = _account_reply_graph(self.kuzu, topic_id, since_days)
         if g is None or g.number_of_edges() == 0:
             out.metrics = {"community_count": 0, **meta}
             out.elapsed_ms = int((time.monotonic() - t0) * 1000)

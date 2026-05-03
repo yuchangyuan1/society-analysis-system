@@ -320,57 +320,168 @@ def _render_topic(entry: Optional[dict[str, Any]]) -> None:
 
 # ─── Graph ───────────────────────────────────────────────────────────────────
 
+# Color palette indexed by node label / community
+_LABEL_COLORS = {
+    "Account": "#4f81bd",   # blue
+    "Post":    "#9bbb59",   # green
+    "Topic":   "#c0504d",   # red
+    "Entity":  "#8064a2",   # purple
+}
+_COMMUNITY_PALETTE = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#bcbd22", "#17becf", "#7f7f7f",
+]
+
+
 def _render_graph(entry: Optional[dict[str, Any]]) -> None:
     if not entry:
         st.caption(
-            "Ask *\"who is driving this topic?\"* or *\"is this coordinated?\"* "
-            "to populate the propagation graph."
+            "Ask *\"who is driving this topic?\"* / *\"trace the reply chain\"* "
+            "/ *\"is this coordinated?\"* to populate this tab."
         )
         return
-    data = entry["data"]
+    source = entry.get("source", "")
+    data = entry.get("data") or {}
+
+    # ── v2 path: KGOutput ────────────────────────────────────────────────────
+    if source == "kg" or "query_kind" in data:
+        _render_kg_output(data)
+        return
+
+    # ── legacy path: v1 propagation_analysis dict ────────────────────────────
     cols = st.columns(3)
-    cols[0].metric("Posts", data.get("post_count", 0))
-    cols[1].metric("Accounts", data.get("unique_accounts", 0))
+    cols[0].metric("Posts",     data.get("post_count", 0))
+    cols[1].metric("Accounts",  data.get("unique_accounts", 0))
     cols[2].metric("Velocity /h", f"{data.get('velocity', 0.0):.2f}")
+    if data:
+        with st.expander("Raw data"):
+            st.json(data)
 
-    cols2 = st.columns(3)
-    cols2[0].metric("Communities", data.get("community_count", 0))
-    cols2[1].metric("Echo chambers", data.get("echo_chamber_count", 0))
-    cols2[2].metric(
-        "Bridge infl.",
-        f"{data.get('bridge_influence_ratio', 0.0):.2f}",
+
+def _render_kg_output(data: dict[str, Any]) -> None:
+    """Render a KGOutput payload (v2 KG branch)."""
+    kind = data.get("query_kind", "?")
+    metrics = data.get("metrics") or {}
+    nodes = data.get("nodes") or []
+    edges = data.get("edges") or []
+
+    st.markdown(f"**Query:** `{kind}`")
+    if metrics:
+        # Show key metrics as columns when there are 1-4 numeric ones
+        numeric = [(k, v) for k, v in metrics.items()
+                   if isinstance(v, (int, float, bool))]
+        if 1 <= len(numeric) <= 4:
+            cols = st.columns(len(numeric))
+            for i, (k, v) in enumerate(numeric):
+                cols[i].metric(k.replace("_", " "),
+                               f"{v:.3f}" if isinstance(v, float) else str(v))
+        else:
+            st.json(metrics)
+
+    if not nodes:
+        st.info("No graph nodes returned.")
+        if data.get("target"):
+            with st.expander("Query target"):
+                st.json(data["target"])
+        return
+
+    _render_kg_graph(nodes, edges)
+    _render_kg_node_table(nodes)
+
+
+def _render_kg_graph(nodes: list[dict], edges: list[dict]) -> None:
+    """Try the interactive agraph renderer; fall back to a legend-only view."""
+    try:
+        from streamlit_agraph import agraph, Node, Edge, Config  # type: ignore
+    except ImportError:
+        st.caption("(install `streamlit-agraph` for interactive view)")
+        return
+
+    # Pick a colour: explicit community_id wins, then label.
+    def _color(n: dict) -> str:
+        props = n.get("properties") or {}
+        cid = props.get("community_id")
+        if isinstance(cid, int):
+            return _COMMUNITY_PALETTE[cid % len(_COMMUNITY_PALETTE)]
+        return _LABEL_COLORS.get(n.get("label", ""), "#999999")
+
+    def _label(n: dict) -> str:
+        props = n.get("properties") or {}
+        if n.get("label") == "Post":
+            author = props.get("author") or props.get("author_id") or ""
+            return author or n["id"][:12]
+        if n.get("label") == "Account":
+            return n["id"]  # already human-readable handle in our schema
+        if n.get("label") == "Entity":
+            return props.get("name") or n["id"]
+        return n["id"]
+
+    def _title(n: dict) -> str:
+        props = n.get("properties") or {}
+        bits = [f"id: {n['id']}", f"label: {n.get('label', '?')}"]
+        for k, v in props.items():
+            if v in (None, ""):
+                continue
+            bits.append(f"{k}: {str(v)[:120]}")
+        return "\n".join(bits)
+
+    a_nodes = []
+    a_edges = []
+    seen: set[str] = set()
+    for n in nodes:
+        if n["id"] in seen:
+            continue
+        seen.add(n["id"])
+        size = 18
+        props = n.get("properties") or {}
+        if "pagerank" in props:
+            size = 12 + int(float(props["pagerank"]) * 250)
+        elif "betweenness" in props:
+            size = 12 + int(float(props["betweenness"]) * 60)
+        elif "cascade_size" in props:
+            size = 12 + int(props["cascade_size"]) * 4
+        a_nodes.append(Node(
+            id=n["id"], label=_label(n), title=_title(n),
+            size=size, color=_color(n),
+        ))
+    for e in edges:
+        if e.get("source_id") not in seen or e.get("target_id") not in seen:
+            continue
+        a_edges.append(Edge(
+            source=e["source_id"], target=e["target_id"],
+            label=e.get("rel_type", ""),
+        ))
+
+    cfg = Config(
+        width="100%", height=420,
+        directed=True, physics=True,
+        nodeHighlightBehavior=True, highlightColor="#f7d774",
+        collapsible=False,
     )
+    agraph(nodes=a_nodes, edges=a_edges, config=cfg)
 
-    communities = data.get("communities") or []
-    if communities:
-        st.markdown("**Communities**")
-        st.dataframe(
-            [
-                {
-                    "id": c.get("community_id", ""),
-                    "label": c.get("label", ""),
-                    "size": c.get("size", 0),
-                    "isolation": round(c.get("isolation_score", 0.0), 2),
-                    "emotion": c.get("dominant_emotion", ""),
-                    "echo": c.get("is_echo_chamber", False),
-                }
-                for c in communities
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
 
-    roles = data.get("account_role_summary") or {}
-    if roles:
-        with st.expander("Account roles"):
-            st.dataframe(
-                [{"role": k, "count": v} for k, v in roles.items()],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    if data.get("anomaly_detected"):
-        st.warning(data.get("anomaly_description") or "Anomaly detected.")
+def _render_kg_node_table(nodes: list[dict]) -> None:
+    """Tabular view below the graph: human-readable per-node properties."""
+    rows = []
+    for n in nodes:
+        props = n.get("properties") or {}
+        rows.append({
+            "id": n["id"],
+            "label": n.get("label", ""),
+            "author": props.get("author") or props.get("author_id") or "",
+            "name":   props.get("name") or "",
+            "score": (round(props.get("pagerank"), 4)
+                      if props.get("pagerank") is not None
+                      else round(props.get("betweenness"), 4)
+                           if props.get("betweenness") is not None
+                           else props.get("cascade_size", "")),
+            "community": props.get("community_id", ""),
+            "preview": (props.get("text") or "")[:140],
+        })
+    if rows:
+        with st.expander(f"Nodes ({len(rows)})", expanded=False):
+            st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
 # ─── Metrics ─────────────────────────────────────────────────────────────────

@@ -41,7 +41,12 @@ from models.report_v2 import ReportV2
 log = structlog.get_logger(__name__)
 
 
-_CITATION_RE = re.compile(r"\[([A-Za-z0-9_\-:]+)\]")
+# Only bracketed internal evidence ids are programmatically resolved here.
+# Markdown source links such as [AP News](https://...) are user-facing
+# citations and must not be mistaken for chunk ids.
+_CITATION_RE = re.compile(
+    r"\[((?:[0-9a-f]{12,}|c[\w:-]*|ev[\w:-]*|chunk_[\w:-]+))\]"
+)
 
 
 _CRITIC_SYSTEM = """You are a quality critic for a research-system answer.
@@ -128,9 +133,8 @@ class QualityCritic:
 
     def _check_citations(self, report: ReportV2) -> Optional[ErrorKind]:
         cited_in_text = set(_CITATION_RE.findall(report.markdown_body))
-        if not cited_in_text and report.has_citations():
-            # Has citations available but didn't actually cite them inline.
-            return "citation_missing"
+        if not cited_in_text:
+            return None
         if cited_in_text:
             available = {c.chunk_id for c in report.citations}
             unknown = cited_in_text - available

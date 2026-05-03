@@ -17,7 +17,6 @@ from .postgres_service import PostgresService
 from .reddit_service import RedditService
 from .reflection_store import ReflectionStore
 from .schema_sync import SchemaSync
-from .telegram_service import TelegramService
 from .wikipedia_service import WikipediaService
 
 __all__ = [
@@ -33,6 +32,5 @@ __all__ = [
     "RedditService",
     "ReflectionStore",
     "SchemaSync",
-    "TelegramService",
     "WikipediaService",
 ]

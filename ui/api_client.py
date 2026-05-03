@@ -67,3 +67,15 @@ def chat_query(session_id: str, message: str) -> dict[str, Any]:
 
 def get_session(session_id: str) -> dict[str, Any]:
     return _get_json(f"/chat/session/{session_id}")
+
+
+def import_reddit(payload: dict[str, Any]) -> dict[str, Any]:
+    return _post_json("/admin/import/reddit", payload, timeout=15.0)
+
+
+def import_official(payload: dict[str, Any]) -> dict[str, Any]:
+    return _post_json("/admin/import/official", payload, timeout=15.0)
+
+
+def get_import_job(job_id: str) -> dict[str, Any]:
+    return _get_json(f"/admin/import/jobs/{job_id}")

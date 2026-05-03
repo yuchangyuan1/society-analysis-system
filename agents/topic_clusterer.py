@@ -16,9 +16,9 @@ Output is a `list[TopicCluster]`; the v2 pipeline then:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
@@ -119,17 +119,29 @@ class TopicClusterer:
             log.error("topic_clusterer.kmeans_error", error=str(exc)[:120])
             return []
 
+        # Pass 1: group posts by cluster index (topic_id assigned later)
         clusters: dict[int, TopicCluster] = {}
         for post, label in zip(posts, labels):
             label_int = int(label)
             cluster = clusters.get(label_int)
             if cluster is None:
-                topic_id = f"topic_{uuid.uuid4().hex[:10]}"
-                cluster = TopicCluster(topic_id=topic_id,
+                cluster = TopicCluster(topic_id="",  # backfilled below
                                        label=f"Topic {label_int + 1}")
                 clusters[label_int] = cluster
             cluster.post_ids.append(post.id)
-            post.topic_id = cluster.topic_id
+
+        # Pass 2: derive a stable, content-addressed topic_id from the
+        # sorted member post ids. Same set of posts -> same topic_id
+        # across pipeline runs. This lets users follow trends over days
+        # without random UUIDs breaking continuity.
+        for cluster in clusters.values():
+            tid_hash = hashlib.sha256(
+                "|".join(sorted(cluster.post_ids)).encode("utf-8")
+            ).hexdigest()[:12]
+            cluster.topic_id = f"topic_{tid_hash}"
+        # Pass 3: assign topic_id to each post
+        for post, label in zip(posts, labels):
+            post.topic_id = clusters[int(label)].topic_id
 
         # Compute centroid text + dominant emotion per cluster
         post_by_id = {p.id: p for p in posts}

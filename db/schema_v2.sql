@@ -80,6 +80,49 @@ CREATE TABLE IF NOT EXISTS topics_v2 (
     last_updated_in_run TEXT NOT NULL DEFAULT 'legacy_pre_v6'
 );
 
+-- topics_v2.post_count is recomputed by trigger from posts_v2.topic_id so it
+-- never drifts from reality. Keeps "hot topic" ranking honest after rollbacks
+-- and post deletions.
+CREATE OR REPLACE FUNCTION refresh_topic_post_count() RETURNS trigger AS $$
+DECLARE
+    affected TEXT[];
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        affected := ARRAY[OLD.topic_id];
+    ELSIF TG_OP = 'INSERT' THEN
+        affected := ARRAY[NEW.topic_id];
+    ELSE
+        affected := ARRAY[NEW.topic_id, OLD.topic_id];
+    END IF;
+
+    UPDATE topics_v2 t
+    SET post_count = (
+            SELECT COUNT(*) FROM posts_v2 p WHERE p.topic_id = t.topic_id
+        ),
+        updated_at = NOW()
+    WHERE t.topic_id = ANY(affected)
+      AND t.topic_id IS NOT NULL;
+    RETURN NULL;
+END
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS posts_v2_topic_count_ins ON posts_v2;
+CREATE TRIGGER posts_v2_topic_count_ins
+    AFTER INSERT ON posts_v2
+    FOR EACH ROW EXECUTE FUNCTION refresh_topic_post_count();
+
+DROP TRIGGER IF EXISTS posts_v2_topic_count_upd ON posts_v2;
+CREATE TRIGGER posts_v2_topic_count_upd
+    AFTER UPDATE OF topic_id ON posts_v2
+    FOR EACH ROW
+    WHEN (OLD.topic_id IS DISTINCT FROM NEW.topic_id)
+    EXECUTE FUNCTION refresh_topic_post_count();
+
+DROP TRIGGER IF EXISTS posts_v2_topic_count_del ON posts_v2;
+CREATE TRIGGER posts_v2_topic_count_del
+    AFTER DELETE ON posts_v2
+    FOR EACH ROW EXECUTE FUNCTION refresh_topic_post_count();
+
 -- ---------- entities_v2 ----------------------------------------------------
 CREATE TABLE IF NOT EXISTS entities_v2 (
     entity_id         TEXT PRIMARY KEY,

@@ -164,6 +164,67 @@ def _topic_post_reply_graph(
     return g
 
 
+def _append_influencer_context_edges(
+    out: KGOutput,
+    g: Any,
+    scores: dict[str, float],
+    top_accounts: set[str],
+    *,
+    max_nodes: int = 40,
+    max_edges: int = 80,
+) -> None:
+    """Add a compact one-hop subgraph around ranked influencer accounts."""
+    seen_nodes = {node.id for node in out.nodes}
+
+    def _add_node(account_id: str, role: str) -> bool:
+        if account_id in seen_nodes:
+            return True
+        if len(out.nodes) >= max_nodes:
+            return False
+        seen_nodes.add(account_id)
+        out.nodes.append(KGNode(
+            id=account_id,
+            label="Account",
+            properties={
+                "pagerank": round(float(scores.get(account_id, 0.0)), 6),
+                "in_degree": int(g.in_degree(account_id)),
+                "out_degree": int(g.out_degree(account_id)),
+                "role": role,
+            },
+        ))
+        return True
+
+    edge_rows = []
+    for u, v, data in g.edges(data=True):
+        u = str(u)
+        v = str(v)
+        if u not in top_accounts and v not in top_accounts:
+            continue
+        weight = int(data.get("weight", 1) or 1)
+        both_top = int(u in top_accounts and v in top_accounts)
+        edge_rows.append((both_top, weight, u, v))
+    edge_rows.sort(reverse=True)
+
+    seen_edges: set[tuple[str, str]] = set()
+    for _both_top, weight, source, target in edge_rows:
+        if len(out.edges) >= max_edges:
+            break
+        if not _add_node(source, "top" if source in top_accounts else "neighbor"):
+            continue
+        if not _add_node(target, "top" if target in top_accounts else "neighbor"):
+            continue
+        key = (source, target)
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
+        out.edges.append(KGEdge(
+            source_id=source,
+            target_id=target,
+            rel_type="RepliedTo",
+            properties={"weight": weight},
+        ))
+
+
 # ── Public API ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -213,13 +274,19 @@ class KGAnalytics:
             return out
 
         ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        top_accounts = {str(acc_id) for acc_id, _score in ranked[:top_k]}
         for acc_id, score in ranked[:top_k]:
             out.nodes.append(KGNode(
                 id=acc_id, label="Account",
                 properties={"pagerank": round(float(score), 6),
                              "in_degree": int(g.in_degree(acc_id)),
-                             "out_degree": int(g.out_degree(acc_id))},
+                             "out_degree": int(g.out_degree(acc_id)),
+                             "role": "top"},
             ))
+        _append_influencer_context_edges(
+            out, g, {str(k): float(v) for k, v in scores.items()},
+            top_accounts,
+        )
         out.metrics = {
             "node_count": g.number_of_nodes(),
             "edge_count": g.number_of_edges(),

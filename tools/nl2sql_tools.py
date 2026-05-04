@@ -116,8 +116,16 @@ Rules:
   topic totals.
 - When the user asks for dominant emotion within a specific
   time/source/subreddit window, compute it from matching posts_v2 rows with
-  mode() WITHIN GROUP (ORDER BY posts_v2.dominant_emotion). Do not use
-  topics_v2.dominant_emotion unless the user asks for the topic-level total.
+  mode() WITHIN GROUP (ORDER BY posts_v2.dominant_emotion), but fall back to
+  topics_v2.dominant_emotion when all matching post-level emotions are NULL
+  or empty. Use:
+      COALESCE(
+        mode() WITHIN GROUP (ORDER BY NULLIF(p.dominant_emotion, '')),
+        NULLIF(t.dominant_emotion, ''),
+        'Not specified'
+      )
+  This avoids hiding a topic-level emotion just because individual post rows
+  were not annotated.
 
 Freshness rules (production hardening):
 - DEFAULT time window when the user input mentions "trend",
@@ -209,10 +217,12 @@ _BUILTIN_GUIDANCE: list[tuple[str, str, str, int]] = [
         "filtered_topic_dominant_emotion_from_posts",
         "Rule: if the user asks for dominant emotion while also specifying "
         "a time window, subreddit, or source corpus, compute dominant_emotion "
-        "from the matching posts_v2 rows after those filters. Use "
-        "COALESCE(mode() WITHIN GROUP (ORDER BY p.dominant_emotion), "
-        "'Not specified') AS dominant_emotion. Do not return "
-        "topics_v2.dominant_emotion for that filtered column.",
+        "from the matching posts_v2 rows after those filters, but fall back "
+        "to topics_v2.dominant_emotion when every matching post-level emotion "
+        "is NULL or empty. Use COALESCE(mode() WITHIN GROUP (ORDER BY "
+        "NULLIF(p.dominant_emotion, '')), NULLIF(t.dominant_emotion, ''), "
+        "'Not specified') AS dominant_emotion. Do not lose the topic-level "
+        "emotion when post rows are unannotated.",
         "rule",
         100,
     ),
@@ -238,8 +248,9 @@ _BUILTIN_GUIDANCE: list[tuple[str, str, str, int]] = [
         "Example: List the topics from today's worldnews data with topic_id, "
         "label, post count, and dominant emotion. SQL shape: SELECT "
         "t.topic_id, t.label, COUNT(*) AS post_count, "
-        "COALESCE(mode() WITHIN GROUP (ORDER BY p.dominant_emotion), "
-        "'Not specified') AS dominant_emotion "
+        "COALESCE(mode() WITHIN GROUP (ORDER BY NULLIF(p.dominant_emotion, "
+        "'')), NULLIF(t.dominant_emotion, ''), 'Not specified') AS "
+        "dominant_emotion "
         "FROM posts_v2 p JOIN topics_v2 t ON p.topic_id = t.topic_id "
         "WHERE p.posted_at >= NOW() - INTERVAL '1 day' "
         "AND p.subreddit = 'worldnews' GROUP BY t.topic_id, t.label "
@@ -248,6 +259,9 @@ _BUILTIN_GUIDANCE: list[tuple[str, str, str, int]] = [
         90,
     ),
 ]
+
+_BUILTIN_GUIDANCE_SEEDED = False
+_LIVE_SCHEMA_COLUMNS_CACHE: Optional[set[tuple[str, str]]] = None
 
 
 # ── Service ──────────────────────────────────────────────────────────────────
@@ -292,6 +306,7 @@ class NL2SQLTool:
         embedding = self.embeddings.embed(nl_query)
         guidance_hits = self.memory.recall_guidance(embedding, n_results=8)
         schema_hits = self.memory.recall_schema(embedding, n_results=8)
+        schema_hits = self._filter_live_schema_hints(schema_hits)
         success_hits = self.memory.recall_success(embedding, n_results=5)
         error_hits = self.memory.recall_errors(embedding, n_results=3)
 
@@ -418,16 +433,68 @@ class NL2SQLTool:
                 sections.append(f"  - {h.get('document', '')}")
         return "\n".join(sections)
 
+    def _filter_live_schema_hints(self, hits: list[dict]) -> list[dict]:
+        """Drop stale Chroma 2 schema docs for columns no longer in Postgres."""
+        live = self._live_schema_columns()
+        if not live:
+            return hits
+        filtered: list[dict] = []
+        for hit in hits:
+            meta = hit.get("metadata") or {}
+            table = str(meta.get("table_name") or "").strip()
+            column = str(meta.get("column_name") or "").strip()
+            if not table or not column:
+                # Non-column schema prose is still useful.
+                filtered.append(hit)
+                continue
+            if (table, column) in live:
+                filtered.append(hit)
+            else:
+                log.warning(
+                    "nl2sql.stale_schema_hint_skipped",
+                    table=table,
+                    column=column,
+                    hint_id=hit.get("id"),
+                )
+        return filtered
+
+    def _live_schema_columns(self) -> set[tuple[str, str]]:
+        global _LIVE_SCHEMA_COLUMNS_CACHE
+        if _LIVE_SCHEMA_COLUMNS_CACHE is not None:
+            return _LIVE_SCHEMA_COLUMNS_CACHE
+        try:
+            conn = psycopg2.connect(self.readonly_dsn)
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT table_name, column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                        """
+                    )
+                    _LIVE_SCHEMA_COLUMNS_CACHE = {
+                        (str(table), str(column))
+                        for table, column in cur.fetchall()
+                    }
+                    self.memory.prune_stale_schema(_LIVE_SCHEMA_COLUMNS_CACHE)
+        except Exception as exc:
+            log.warning("nl2sql.live_schema_load_failed",
+                        error=str(exc)[:160])
+            _LIVE_SCHEMA_COLUMNS_CACHE = set()
+        finally:
+            try:
+                conn.close()  # type: ignore[name-defined]
+            except Exception:
+                pass
+        return _LIVE_SCHEMA_COLUMNS_CACHE
+
     def _ensure_builtin_guidance(self) -> None:
         """Seed durable NL2SQL operating rules into Chroma 2 if missing."""
         if not self.ensure_builtin_guidance:
             return
-        try:
-            if self.memory.count_guidance() >= len(_BUILTIN_GUIDANCE):
-                return
-        except Exception as exc:
-            log.warning("nl2sql.guidance_count_failed",
-                        error=str(exc)[:120])
+        global _BUILTIN_GUIDANCE_SEEDED
+        if _BUILTIN_GUIDANCE_SEEDED:
             return
 
         for rule_id, text, category, priority in _BUILTIN_GUIDANCE:
@@ -443,6 +510,7 @@ class NL2SQLTool:
                 log.warning("nl2sql.guidance_seed_failed",
                             rule_id=rule_id,
                             error=str(exc)[:120])
+        _BUILTIN_GUIDANCE_SEEDED = True
 
     def _llm_generate(
         self,

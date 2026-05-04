@@ -271,9 +271,12 @@ def _edge_rows(edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for edge in edges:
         rows.append({
-            "source": edge.get("source") or edge.get("from"),
-            "target": edge.get("target") or edge.get("to"),
-            "relation": edge.get("type") or edge.get("label") or edge.get("relation"),
+            "source": edge.get("source_id") or edge.get("source") or edge.get("from"),
+            "target": edge.get("target_id") or edge.get("target") or edge.get("to"),
+            "relation": (
+                edge.get("rel_type") or edge.get("type")
+                or edge.get("label") or edge.get("relation")
+            ),
         })
     return rows
 
@@ -302,13 +305,16 @@ def _render_graph_canvas(nodes: list[dict[str, Any]], edges: list[dict[str, Any]
     graph_edges = []
     node_ids = {n.id for n in graph_nodes}
     for edge in edges[:160]:
-        source = str(edge.get("source") or edge.get("from") or "")
-        target = str(edge.get("target") or edge.get("to") or "")
+        source = str(edge.get("source_id") or edge.get("source") or edge.get("from") or "")
+        target = str(edge.get("target_id") or edge.get("target") or edge.get("to") or "")
         if source in node_ids and target in node_ids:
             graph_edges.append(Edge(
                 source=source,
                 target=target,
-                label=str(edge.get("type") or edge.get("relation") or ""),
+                label=str(
+                    edge.get("rel_type") or edge.get("type")
+                    or edge.get("relation") or ""
+                ),
             ))
 
     if not graph_nodes:

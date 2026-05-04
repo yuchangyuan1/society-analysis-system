@@ -136,6 +136,10 @@ class PostgresService:
         extra: Optional[dict] = None,
         run_id: str = "legacy_pre_v6",
     ) -> None:
+        # post_count is authoritative-maintained by the refresh_topic_post_count
+        # trigger on posts_v2; pass it through here only as the initial value
+        # for brand-new topic rows. The ON CONFLICT branch deliberately does
+        # NOT overwrite post_count, so the trigger-maintained truth wins.
         with self.cursor() as cur:
             cur.execute("""
                 INSERT INTO topics_v2 (topic_id, label, post_count,
@@ -144,7 +148,6 @@ class PostgresService:
                 VALUES (%s,%s,%s,%s,%s,%s,NOW(),%s,%s)
                 ON CONFLICT (topic_id) DO UPDATE SET
                     label            = EXCLUDED.label,
-                    post_count       = EXCLUDED.post_count,
                     dominant_emotion = EXCLUDED.dominant_emotion,
                     centroid_text    = EXCLUDED.centroid_text,
                     extra            = topics_v2.extra || EXCLUDED.extra,

@@ -9,16 +9,20 @@ without re-deriving them from the text.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from pydantic import BaseModel, Field
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class ChatMessage(BaseModel):
     """One chat message as the UI displays it (no structured payload)."""
     role: str                            # "user" | "assistant"
     content: str
-    at: datetime = Field(default_factory=datetime.utcnow)
+    at: datetime = Field(default_factory=_utcnow)
 
 
 class ChatQuery(BaseModel):

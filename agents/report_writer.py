@@ -77,6 +77,12 @@ Hard rules:
 - If an SQL output says rows=0, state that no matching Reddit/community rows
   were retrieved. Do not describe Reddit posts, comments, authors, counts, or
   discussion themes for that SQL output.
+- For topic-level sentiment, prefer an explicit topic/table aggregate
+  (`topics_v2.dominant_emotion` or a `dominant_emotion` SQL column) over
+  inferring "Not specified" from missing post-level annotations. If the SQL
+  row contains both a topic-level emotion and post-level emotions are missing,
+  report the topic-level emotion and mention the post-level limitation only
+  if it matters.
 - If the user explicitly asks for topic_id or entity_id, preserve those raw
   ids in the markdown and put the human-readable label/name next to them.
 - If an SQL row is shown in the payload, use its actual values. Do not write
@@ -109,6 +115,11 @@ Graph (KG) presentation rules:
   scores in plain language ("most influential", "central bridge",
   "tight cluster of N accounts"), and quote one or two characteristic
   posts when post-level data is in the bundle.
+- If a KG output has no nodes, no edges, and no positive graph metrics, say
+  the graph data is insufficient for that KG analysis. Never turn missing
+  graph data into a negative conclusion. In particular, do not say a topic
+  "does not form an echo chamber" unless the KG output contains enough graph
+  metrics to support that verdict.
 
 Fact-check / official-source verification rules:
 - Start with a short verdict using one of these labels:
@@ -188,27 +199,42 @@ class ReportWriter:
 
         if (_planned_branch(execution, "nl2sql") and not sql_outs
                 and _question_needs_sql(rq)):
-            report.markdown_body = (
-                "I couldn't answer the requested topic/count/emotion query "
-                "because the NL2SQL branch failed before returning rows. "
-                "The structured output includes the branch error; retry after "
-                "fixing that query path or ask for a graph-only view."
-            )
-            report.needs_human_review = True
-            report.notes.append("nl2sql_required_but_failed")
-            return report
+            if not (kg_outs and _question_needs_kg(rq)):
+                report.markdown_body = (
+                    "I couldn't answer the requested topic/count/emotion "
+                    "query because the NL2SQL branch failed before returning "
+                    "rows. The structured output includes the branch error."
+                )
+                report.needs_human_review = True
+                report.notes.append("nl2sql_required_but_failed")
+                return report
+            report.notes.append("nl2sql_failed_but_kg_available")
 
-        if (_question_needs_sql(rq) and sql_outs
-                and not any(s.rows for s in sql_outs)):
-            report.markdown_body = (
-                "I ran the SQL query for this request, but it returned no "
-                "matching rows. I won't invent topics or counts; check the "
-                "structured SQL output for the exact filter that produced the "
-                "empty result."
-            )
-            report.needs_human_review = True
-            report.notes.append("nl2sql_empty_result")
-            return report
+        if _question_needs_sql(rq) and sql_outs:
+            successful_sql = [s for s in sql_outs if s.success]
+            if not successful_sql:
+                if not (kg_outs and _question_needs_kg(rq)):
+                    report.markdown_body = (
+                        "The NL2SQL branch failed before returning rows. I "
+                        "won't invent Reddit/community facts; check the "
+                        "structured SQL output for the failed attempts."
+                    )
+                    report.needs_human_review = True
+                    report.notes.append("nl2sql_failed")
+                    return report
+                report.notes.append("nl2sql_failed_but_kg_available")
+            elif not any(s.rows for s in successful_sql):
+                if not (kg_outs and _question_needs_kg(rq)):
+                    report.markdown_body = (
+                        "I ran the SQL query for this request, but it "
+                        "returned no matching rows. I won't invent topics or "
+                        "counts; check the structured SQL output for the "
+                        "exact filter that produced the empty result."
+                    )
+                    report.needs_human_review = True
+                    report.notes.append("nl2sql_empty_result")
+                    return report
+                report.notes.append("nl2sql_empty_but_kg_available")
 
         if not (evidence_outs or sql_outs or kg_outs):
             report.markdown_body = (
@@ -264,6 +290,8 @@ class ReportWriter:
         body = _apply_fact_check_data_guards(
             body, rq, evidence_outs, sql_outs,
         )
+        body = _apply_topic_sentiment_guard(body, sql_outs)
+        body = _apply_kg_data_guards(body, rq, kg_outs)
 
         report.markdown_body = body
         for n in numbers_raw:
@@ -395,6 +423,20 @@ class ReportWriter:
                     f"  - kind={k.query_kind} target={k.target} "
                     f"metrics={k.metrics}"
                 )
+                if k.target.get("fallback_from_topic_id"):
+                    sections.append(
+                        "    topic_fallback: primary topic "
+                        f"{k.target.get('fallback_from_topic_id')} had no "
+                        "KG graph signal; this KG result uses semantically "
+                        f"similar topic {k.target.get('selected_topic_id')}."
+                    )
+                if not _kg_has_signal(k):
+                    sections.append(
+                        "    graph_availability: no usable graph nodes, "
+                        "edges, or positive metrics. Treat this as "
+                        "insufficient graph data, not evidence that the "
+                        "network pattern is absent."
+                    )
                 if k.nodes:
                     sample = [
                         {"id": n.id, "label": n.label,
@@ -572,6 +614,22 @@ def _question_needs_sql(rq: RewrittenQuery) -> bool:
     ))
 
 
+def _question_needs_kg(rq: RewrittenQuery) -> bool:
+    kg_intents = {
+        "propagation", "propagation_trace", "influencer_query",
+        "coordination_check", "community_structure", "cascade_query",
+        "explain_decision",
+    }
+    if any(s.intent in kg_intents for s in rq.subtasks):
+        return True
+    text = " ".join([rq.original] + [s.text for s in rq.subtasks]).lower()
+    return any(k in text for k in (
+        "knowledge graph", "kg", "propagation", "reply chain",
+        "reply chains", "path", "paths", "amplifying", "influencer",
+        "network", "centrality", "echo chamber", "community structure",
+    ))
+
+
 def _question_is_fact_check(rq: RewrittenQuery) -> bool:
     if any(s.intent == "topic_claim_audit" for s in rq.subtasks):
         return False
@@ -613,7 +671,14 @@ def _question_requests_id(rq: RewrittenQuery, field_name: str) -> bool:
 def _kg_has_signal(k: KGOutput) -> bool:
     if k.nodes or k.edges:
         return True
-    return any(v not in (0, 0.0, None, "", [], {}) for v in k.metrics.values())
+    for key, value in k.metrics.items():
+        if key in {"cache_hit", "since_days", "reason"}:
+            continue
+        if isinstance(value, (int, float)) and value > 0:
+            return True
+        if value not in (0, 0.0, None, "", [], {}):
+            return True
+    return False
 
 
 def _node_excerpt(node: Any) -> str:
@@ -660,6 +725,89 @@ def _apply_fact_check_data_guards(
     if not missing:
         return body
     return body.rstrip() + "\n\n" + "\n".join(missing)
+
+
+def _apply_topic_sentiment_guard(
+    body: str,
+    sql_outs: list[SQLOutput],
+) -> str:
+    """Correct a common report error: ignoring topic-level emotion fallback."""
+    emotion = _best_sql_emotion(sql_outs)
+    if not emotion:
+        return body
+    lower = body.lower()
+    if "dominant emotion" not in lower or "not specified" not in lower:
+        return body
+
+    replacement = (
+        f"**Dominant Emotion:** {emotion} "
+        "(topic-level aggregate; post-level rows may be unannotated)."
+    )
+    updated = re.sub(
+        r"(?im)^(\s*[-*]\s*)?\*\*Dominant Emotion\*\*:.*$",
+        lambda m: f"{m.group(1) or ''}{replacement}",
+        body,
+        count=1,
+    )
+    if updated != body:
+        return updated
+    updated = re.sub(
+        r"(?is)dominant emotion[^.\n]*not specified[^.\n]*(?:\.|$)",
+        f"dominant emotion is {emotion} at the topic level. ",
+        body,
+        count=1,
+    )
+    return updated
+
+
+def _best_sql_emotion(sql_outs: list[SQLOutput]) -> str:
+    for sql_out in sql_outs:
+        for row in sql_out.rows:
+            for key in (
+                "dominant_emotion",
+                "topic_dominant_emotion",
+                "topic_emotion",
+            ):
+                value = str(row.get(key) or "").strip()
+                if value and value.lower() not in {
+                    "not specified", "null", "none", "unknown",
+                }:
+                    return value
+    return ""
+
+
+def _apply_kg_data_guards(
+    body: str,
+    rq: RewrittenQuery,
+    kg_outs: list[KGOutput],
+) -> str:
+    """Prevent missing KG data from being phrased as a negative finding."""
+    if not kg_outs or any(_kg_has_signal(k) for k in kg_outs):
+        return body
+    text = " ".join([rq.original] + [s.text for s in rq.subtasks]).lower()
+    kg_sensitive = any(k in text for k in (
+        "echo chamber", "cluster", "clusters", "community",
+        "propagation", "reply chain", "network",
+    ))
+    if not kg_sensitive:
+        return body
+
+    limitation = (
+        "The KG branch returned no usable nodes, edges, or positive graph "
+        "metrics for this topic, so this run cannot determine whether the "
+        "discussion forms an echo chamber or distinct graph clusters."
+    )
+    replacements = [
+        r"(?is)the discussion does not form an echo chamber[^.\n]*(?:\.|$)",
+        r"(?is)the discussion does not exhibit characteristics of an echo chamber[^.\n]*(?:\.|$)",
+        r"(?is)the topic does not form an echo chamber[^.\n]*(?:\.|$)",
+    ]
+    updated = body
+    for pattern in replacements:
+        updated = re.sub(pattern, limitation, updated)
+    if limitation.lower()[:80] in updated.lower():
+        return updated
+    return updated.rstrip() + "\n\n" + limitation
 
 
 def _expand_inline_evidence_citations(

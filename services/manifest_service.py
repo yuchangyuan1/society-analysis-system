@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -46,7 +46,7 @@ class ManifestService:
         image_path: Optional[str] = None,
         days_back: int = 7,
     ) -> RunManifest:
-        started = datetime.utcnow()
+        started = datetime.now(timezone.utc)
         run_id = self._build_run_id(
             started, query_text, subreddits, reddit_query, jsonl_path
         )
@@ -87,7 +87,7 @@ class ManifestService:
         post_count: int = 0,
         report_id: Optional[str] = None,
     ) -> Path:
-        manifest.finished_at = datetime.utcnow()
+        manifest.finished_at = datetime.now(timezone.utc)
         manifest.posts_snapshot_sha256 = posts_snapshot_sha256
         manifest.post_count = post_count
         manifest.report_id = report_id
@@ -98,7 +98,7 @@ class ManifestService:
 
     def mark_failed(self, manifest: RunManifest, error: str = "") -> Path:
         """Set commit_state=failed; lets the rollback scanner pick it up."""
-        manifest.finished_at = datetime.utcnow()
+        manifest.finished_at = datetime.now(timezone.utc)
         manifest.commit_state = "failed"
         path = self._write(manifest)
         log.warning("manifest.failed", run_id=manifest.run_id,

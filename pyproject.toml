@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "society-analysis"
@@ -41,6 +41,27 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
 ]
+
+[tool.setuptools]
+py-modules = ["config", "main"]
+
+[tool.setuptools.packages.find]
+include = [
+    "agents*",
+    "api*",
+    "models*",
+    "scripts*",
+    "services*",
+    "tools*",
+    "ui*",
+]
+exclude = [
+    "data*",
+    "db*",
+    "docs*",
+    "tests*",
+]
+namespaces = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

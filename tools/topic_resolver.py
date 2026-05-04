@@ -20,8 +20,12 @@ Approach:
 
 Caching:
     The embedding work is cached in-memory keyed by `(row_count,
-    max_updated_at)` so we don't re-embed every call. Invalidated
-    automatically when topics_v2 changes.
+    content_fingerprint)` where the fingerprint is md5 over
+    `topic_id || label || centroid_text` for every row. Keyed on content,
+    not `updated_at`, because the `posts_v2` -> `topics_v2.post_count`
+    trigger bumps `updated_at` on every ingest even when label/centroid
+    haven't changed - using updated_at would force a full re-embed after
+    every pipeline run.
 """
 from __future__ import annotations
 
@@ -78,6 +82,22 @@ class TopicResolver:
 
     def resolve(self, phrase: str, top_k: Optional[int] = None) -> list[TopicMatch]:
         """Return up to `top_k` topics ranked by cosine similarity to `phrase`."""
+        return self.resolve_candidates(phrase, top_k=top_k)
+
+    def resolve_candidates(
+        self,
+        phrase: str,
+        top_k: Optional[int] = None,
+        *,
+        include_semantic_alternatives: bool = False,
+        min_similarity: Optional[float] = None,
+    ) -> list[TopicMatch]:
+        """Return topic candidates, optionally adding semantic alternatives.
+
+        Exact label matches are still returned first. KG callers can ask for
+        semantic alternatives so a graph-empty exact topic can fall back to a
+        semantically close topic with actual Kuzu edges.
+        """
         phrase = (phrase or "").strip()
         if not phrase:
             return []
@@ -91,7 +111,7 @@ class TopicResolver:
 
         k = top_k if top_k is not None else self._top_k
         exact = _exact_label_matches(phrase, self._cache.rows)
-        if exact:
+        if exact and not include_semantic_alternatives:
             return exact[:k]
 
         try:
@@ -114,12 +134,25 @@ class TopicResolver:
         # Anchor cutoff to the top match: keep entries that are at least
         # 1/gap_ratio of the best score AND above the absolute floor.
         top_sim = scored[0].similarity
-        cutoff = max(self._min_similarity, top_sim / self._gap_ratio)
+        floor = self._min_similarity if min_similarity is None else min_similarity
+        cutoff = max(floor, top_sim / self._gap_ratio)
         kept = [m for m in scored if m.similarity >= cutoff]
         # Always return at least the top match if it clears the floor.
-        if not kept and top_sim >= self._min_similarity:
+        if not kept and top_sim >= floor:
             kept = [scored[0]]
-        return kept[:k]
+        if not exact:
+            return kept[:k]
+
+        out: list[TopicMatch] = []
+        seen: set[str] = set()
+        for match in exact + kept:
+            if match.topic_id in seen:
+                continue
+            seen.add(match.topic_id)
+            out.append(match)
+            if len(out) >= k:
+                break
+        return out
 
     # ── Cache management ──────────────────────────────────────────────────────
 
@@ -129,11 +162,15 @@ class TopicResolver:
             self._pg.connect()
         with self._pg.cursor() as cur:
             cur.execute(
-                "SELECT count(*) AS n, COALESCE(MAX(updated_at), NOW()) AS m "
+                "SELECT count(*) AS n, "
+                "       COALESCE(md5(string_agg("
+                "           topic_id || '|' || COALESCE(label, '') "
+                "           || '|' || COALESCE(centroid_text, ''), "
+                "           chr(10) ORDER BY topic_id)), '') AS fp "
                 "FROM topics_v2"
             )
             stats = cur.fetchone() or {}
-            cache_key = (int(stats.get("n", 0)), str(stats.get("m", "")))
+            cache_key = (int(stats.get("n", 0)), str(stats.get("fp", "")))
 
         with self._lock:
             if cache_key == self._cache.cache_key and self._cache.rows:

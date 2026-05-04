@@ -66,7 +66,62 @@ freshness defaults to 30 days for trending / propagation queries.
 
 ## Quick start
 
-### 1. Install
+### Option A. Docker Compose, recommended for demos
+
+Use this path for course presentations or when another machine needs to
+reproduce the system with minimal local setup.
+
+Prerequisites:
+
+- Docker Desktop with Compose v2.
+- A `.env` file copied from `.env.example` with at least `OPENAI_API_KEY`
+  filled in.
+
+```bash
+cp .env.example .env
+# edit .env and set OPENAI_API_KEY
+
+docker compose up --build
+```
+
+Open <http://localhost:8501>.
+
+Compose starts:
+
+- `postgres` on host port `15432` with `db/schema_v2.sql` applied on first boot;
+- `api` on <http://localhost:8000>;
+- `ui` on <http://localhost:8501>;
+- shared runtime data under `./data`;
+- persistent Docker volumes for Postgres data and model/cache files.
+
+Useful demo commands:
+
+```bash
+# Seed planner memory after the stack is up.
+docker compose exec api python -m scripts.seed_planner_memory
+
+# Load the bundled fixture into Postgres/Kuzu for an offline smoke demo.
+docker compose exec api python main.py --jsonl tests/fixtures/posts_v2_smoke.jsonl
+
+# Pull official/evidence sources into Chroma.
+docker compose exec api python -m agents.official_ingestion_pipeline --once
+
+# Tear down containers but keep data.
+docker compose down
+
+# Full reset, including Postgres volume and model/cache volume.
+docker compose down -v
+```
+
+Inside containers, the database hostname is `postgres`, not `localhost`.
+The Compose file injects the correct `POSTGRES_DSN`; keep `.env.example`
+using `localhost` for non-Docker local runs.
+
+### Option B. Local Python environment
+
+Use this path if you want to run directly from `.venv`.
+
+#### 1. Install
 
 ```bash
 git clone <repo>
@@ -74,7 +129,7 @@ cd society-analysis-project-update
 python -m venv .venv
 .venv\Scripts\activate    # Windows
 # source .venv/bin/activate   # macOS/Linux
-pip install -e .
+pip install -e .[dev]
 ```
 
 You also need:
@@ -86,7 +141,7 @@ You also need:
   when it's missing.
 - ~600 MB free for the bge-reranker-base model (downloaded on first use).
 
-### 2. Configure
+#### 2. Configure
 
 Copy `.env.example` to `.env` (or just create `.env`):
 
@@ -101,7 +156,7 @@ POSTGRES_READONLY_DSN=postgresql://society_ro:...@localhost:5432/society_db
 MULTIMODAL_DAILY_BUDGET_USD=5.0
 ```
 
-### 3. Initialize the database
+#### 3. Initialize the database
 
 ```bash
 # Create the database first if needed:
@@ -115,9 +170,14 @@ python -c "import psycopg2, config; \
 # If you're upgrading an existing PG that predates the lineage columns,
 # run the idempotent migration once:
 python -m scripts.migrate_run_lineage
+
+# If you're upgrading an existing PG that predates the topic post-count
+# trigger (any DB created before 2026-05), install the trigger and
+# recompute every topics_v2.post_count once:
+python -m scripts.migrate_topic_post_count_trigger
 ```
 
-### 4. Cold-start the planner memory (Chroma 3)
+#### 4. Cold-start the planner memory (Chroma 3)
 
 ```bash
 python -m scripts.seed_planner_memory
@@ -126,7 +186,7 @@ python -m scripts.seed_planner_memory
 This loads three `ModuleCard`s (one per branch) and eight workflow
 exemplars so the Planner has prior art to draw on.
 
-### 5. Run the offline ingestion (one-time, then schedule)
+#### 5. Run the offline ingestion (one-time, then schedule)
 
 ```bash
 # Option A — quick smoke against bundled fixture (no network):
@@ -147,7 +207,7 @@ After step 5 you should see:
   - `chroma_nl2sql` — schema descriptions + NL→SQL exemplars
   - `chroma_planner` — module cards + workflow exemplars
 
-### 6. Start the services
+#### 6. Start the services
 
 ```bash
 # Terminal 1 — FastAPI (port 8000)
@@ -231,6 +291,14 @@ curl http://127.0.0.1:8000/admin/import/jobs/import_xxxxxxxxxxxx
 # Reflection inspector:
 curl 'http://127.0.0.1:8000/reflection/chroma2?kind=success&limit=20'
 curl 'http://127.0.0.1:8000/reflection/log?limit=20'
+
+# Run artifacts (everything written under data/runs/{run_id}/):
+curl http://127.0.0.1:8000/runs                       # list runs
+curl http://127.0.0.1:8000/runs/<run_id>              # one run summary
+curl http://127.0.0.1:8000/runs/<run_id>/report       # report.md
+curl http://127.0.0.1:8000/runs/<run_id>/raw          # report_raw.json
+curl http://127.0.0.1:8000/runs/<run_id>/metrics      # metrics.json
+curl http://127.0.0.1:8000/runs/<run_id>/visual/<filename>   # counter_visuals/*
 ```
 
 ---
@@ -322,6 +390,7 @@ common ones:
 | `NL2SQL_RESULT_ROW_LIMIT` | 1000 | Forced LIMIT on every query |
 | `NL2SQL_STATEMENT_TIMEOUT_MS` | 5000 | Postgres `statement_timeout` per query |
 | `EXPERIENCE_TTL_DAYS` | 30 | Auto-decay age cutoff |
+| `KG_TOPIC_SEMANTIC_FALLBACK_MIN_SIM` | 0.30 | Minimum topic similarity for KG fallback when the exact topic has no graph signal |
 | `EXPERIENCE_MIN_CONFIDENCE` | 0.2 | Auto-decay confidence floor |
 | `MULTIMODAL_DAILY_BUDGET_USD` | 5.0 | Daily image-understanding spend cap |
 | `MULTIMODAL_MIN_LIKES / MIN_REPLIES` | 50 / 20 | Sample threshold for image processing |

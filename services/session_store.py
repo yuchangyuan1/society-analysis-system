@@ -8,7 +8,7 @@ access if they ever run multiple requests concurrently.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -76,7 +76,7 @@ def append_turn(
             content=content,
             capability_used=capability_used,
             branches_used=list(branches_used or []),
-            at=datetime.utcnow(),
+            at=datetime.now(timezone.utc),
         )
     )
     return state

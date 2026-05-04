@@ -7,9 +7,13 @@ user, single machine.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from pydantic import BaseModel, Field
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class ConversationTurn(BaseModel):
@@ -19,7 +23,7 @@ class ConversationTurn(BaseModel):
     capability_used: Optional[str] = None
     # redesign-2026-05 Phase 4: branches the v2 path actually invoked
     branches_used: list[str] = Field(default_factory=list)
-    at: datetime = Field(default_factory=datetime.utcnow)
+    at: datetime = Field(default_factory=_utcnow)
 
 
 class SessionState(BaseModel):
@@ -38,7 +42,7 @@ class SessionState(BaseModel):
         `summary` covers, so we don't recompress the same turns twice.
     """
     session_id: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
     current_run_id: Optional[str] = None
     current_topic_id: Optional[str] = None
     current_claim_id: Optional[str] = None

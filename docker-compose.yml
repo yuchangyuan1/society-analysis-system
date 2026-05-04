@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: society_db
+      POSTGRES_USER: society
+      POSTGRES_PASSWORD: society_pass
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema_v2.sql:/docker-entrypoint-initdb.d/001_schema_v2.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U society -d society_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    image: society-analysis-app:latest
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DSN: postgresql://society:society_pass@postgres:5432/society_db
+      POSTGRES_READONLY_DSN: postgresql://society:society_pass@postgres:5432/society_db
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      KUZU_DB_DIR: /app/data/kuzu_graph
+      RUNS_DIR: /app/data/runs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - model_cache:/root/.cache
+    command: ["python", "-m", "uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  ui:
+    image: society-analysis-app:latest
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DSN: postgresql://society:society_pass@postgres:5432/society_db
+      POSTGRES_READONLY_DSN: postgresql://society:society_pass@postgres:5432/society_db
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      KUZU_DB_DIR: /app/data/kuzu_graph
+      RUNS_DIR: /app/data/runs
+      RESEARCH_API_BASE: http://api:8000
+      RESEARCH_API_TIMEOUT: "30"
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - model_cache:/root/.cache
+    command: ["python", "-m", "streamlit", "run", "ui/streamlit_app.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+
+volumes:
+  postgres_data:
+  model_cache:

@@ -12,10 +12,14 @@ Fingerprinting (PROJECT_REDESIGN_V2.md Phase 2 double-write contract):
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 ColumnLocation = Literal["core", "extra"]
@@ -45,7 +49,7 @@ class SchemaProposal(BaseModel):
     """Aggregate output of one Schema-aware Agent run."""
 
     run_id: str
-    proposed_at: datetime = Field(default_factory=datetime.utcnow)
+    proposed_at: datetime = Field(default_factory=_utcnow)
     columns: list[ColumnSpec] = Field(default_factory=list)
     notes: Optional[str] = None  # free-form summary; logged but not persisted
 

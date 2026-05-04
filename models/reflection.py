@@ -7,10 +7,14 @@ Reflection's full looking glass arrives in Phase 5.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 ErrorKind = Literal[
@@ -44,7 +48,7 @@ class CriticVerdict(BaseModel):
 
 
 class ReflectionRecord(BaseModel):
-    occurred_at: datetime = Field(default_factory=datetime.utcnow)
+    occurred_at: datetime = Field(default_factory=_utcnow)
     session_id: Optional[str] = None
     user_message: str = ""
     error_kind: Optional[ErrorKind] = None

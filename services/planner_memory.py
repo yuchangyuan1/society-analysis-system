@@ -15,6 +15,7 @@ Conflict policy mirrors NL2SQL memory (PROJECT_REDESIGN_V2.md 7c-H, Q11=B):
 """
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -147,10 +148,55 @@ class PlannerMemory:
     def count_branch_combo_successes(self, branches_used: list[str]) -> int:
         """Used by Q9 confidence rule (PROJECT_REDESIGN_V2.md 7c-B)."""
         key = ",".join(branches_used)
-        return self.collections.planner.count(where={
-            "kind": "workflow_success",
-            "branches": key,
-        })
+        try:
+            results = self.collections.planner.handle.get(
+                where={"kind": "workflow_success"},
+                include=["metadatas"],
+            )
+        except Exception as exc:
+            log.warning("planner_memory.count_branch_combo_failed",
+                        error=str(exc)[:160])
+            return 0
+        count = 0
+        for meta in results.get("metadatas") or []:
+            if (meta or {}).get("branches") == key:
+                count += 1
+        return count
+
+    def prune_stale_topic_references(
+        self,
+        live_topic_ids: set[str],
+    ) -> list[str]:
+        """Delete Chroma 3 records that reference removed topic ids."""
+        if not live_topic_ids:
+            return []
+        try:
+            results = self.collections.planner.handle.get(
+                include=["documents", "metadatas"],
+            )
+        except Exception as exc:
+            log.warning("planner_memory.prune_topics_get_failed",
+                        error=str(exc)[:160])
+            return []
+
+        stale_ids: list[str] = []
+        ids = results.get("ids") or []
+        docs = results.get("documents") or []
+        metas = results.get("metadatas") or []
+        for idx, record_id in enumerate(ids):
+            doc = docs[idx] if idx < len(docs) else ""
+            meta = metas[idx] if idx < len(metas) else {}
+            haystack = f"{doc}\n{meta}"
+            refs = set(re.findall(r"\btopic_[0-9a-fA-F]{6,}\b", haystack))
+            if refs and not refs.issubset(live_topic_ids):
+                stale_ids.append(str(record_id))
+
+        if stale_ids:
+            self.collections.planner.delete(ids=stale_ids)
+            log.info("planner_memory.pruned_stale_topics",
+                     count=len(stale_ids),
+                     ids=stale_ids[:20])
+        return stale_ids
 
     def delete_records(self, record_ids: list[str]) -> None:
         if record_ids:

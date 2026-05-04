@@ -290,6 +290,7 @@ def test_planner_resolves_label_topic_target_before_kg():
 
     resolver = MagicMock()
     resolver.resolve.return_value = [Match()]
+    resolver.resolve_candidates.return_value = [Match()]
     rq = RewrittenQuery(
         original="x",
         subtasks=[Subtask(
@@ -337,6 +338,7 @@ def test_planner_resolves_topic_for_propagation_trace_fallback():
 
     resolver = MagicMock()
     resolver.resolve.return_value = [Match()]
+    resolver.resolve_candidates.return_value = [Match()]
     rq = RewrittenQuery(
         original="Trace the propagation path of US Military Arms Sales Controversy.",
         subtasks=[Subtask(
@@ -428,6 +430,7 @@ def test_planner_topic_claim_audit_resolves_topic_and_keeps_sql_first():
 
     resolver = MagicMock()
     resolver.resolve.return_value = [Match()]
+    resolver.resolve_candidates.return_value = [Match()]
     rq = RewrittenQuery(
         original="audit claims",
         subtasks=[Subtask(

@@ -64,6 +64,12 @@ EXPERIENCE_MIN_CONFIDENCE: float = float(
 )
 EXPERIENCE_TTL_DAYS: int = int(os.getenv("EXPERIENCE_TTL_DAYS", "30"))
 
+# KG topic workflows first anchor on the best-matching topic, then may fall
+# back to semantically similar topics when the exact topic has no Kuzu subgraph.
+KG_TOPIC_SEMANTIC_FALLBACK_MIN_SIM: float = float(
+    os.getenv("KG_TOPIC_SEMANTIC_FALLBACK_MIN_SIM", "0.30")
+)
+
 REDDIT_PROXY: str = os.getenv("REDDIT_PROXY", "")
 REDDIT_DEFAULT_SUBREDDITS: list[str] = [
     s.strip()

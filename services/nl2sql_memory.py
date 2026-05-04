@@ -190,6 +190,40 @@ class NL2SQLMemory:
     def count_guidance(self) -> int:
         return self._cols.nl2sql.count(where={"kind": "guide"})
 
+    def prune_stale_schema(
+        self,
+        live_columns: set[tuple[str, str]],
+    ) -> list[str]:
+        """Delete Chroma 2 schema records for columns absent from Postgres."""
+        if not live_columns:
+            return []
+        try:
+            results = self._cols.nl2sql.handle.get(
+                where={"kind": "schema"},
+                include=["metadatas"],
+            )
+        except Exception as exc:
+            log.warning("nl2sql_memory.prune_schema_get_failed",
+                        error=str(exc)[:160])
+            return []
+
+        stale_ids: list[str] = []
+        ids = results.get("ids") or []
+        metas = results.get("metadatas") or []
+        for idx, record_id in enumerate(ids):
+            meta = metas[idx] if idx < len(metas) else {}
+            table = str((meta or {}).get("table_name") or "").strip()
+            column = str((meta or {}).get("column_name") or "").strip()
+            if table and column and (table, column) not in live_columns:
+                stale_ids.append(str(record_id))
+
+        if stale_ids:
+            self._cols.nl2sql.delete(ids=stale_ids)
+            log.info("nl2sql_memory.pruned_stale_schema",
+                     count=len(stale_ids),
+                     ids=stale_ids[:20])
+        return stale_ids
+
     # ── Auto-curation hooks ────────────────────────────────────────────────────
 
     def delete_records(self, record_ids: list[str]) -> None:

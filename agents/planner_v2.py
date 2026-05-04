@@ -35,6 +35,7 @@ from typing import Any, Callable, Optional
 import structlog
 from pydantic import BaseModel, Field
 
+from config import KG_TOPIC_SEMANTIC_FALLBACK_MIN_SIM
 from models.branch_output import (
     BranchExecutionStatus,
     EvidenceOutput,
@@ -240,7 +241,19 @@ class BoundedPlannerV2:
                 return []
         try:
             phrase = sub.targets.topic_id or sub.text
-            matches = self.topic_resolver.resolve(phrase, top_k=3)
+            include_alternatives = _subtask_needs_kg_signal(sub)
+            if hasattr(self.topic_resolver, "resolve_candidates"):
+                matches = self.topic_resolver.resolve_candidates(
+                    phrase,
+                    top_k=6 if include_alternatives else 3,
+                    include_semantic_alternatives=include_alternatives,
+                    min_similarity=(
+                        KG_TOPIC_SEMANTIC_FALLBACK_MIN_SIM
+                        if include_alternatives else None
+                    ),
+                )
+            else:
+                matches = self.topic_resolver.resolve(phrase, top_k=3)
         except Exception as exc:
             log.warning("planner_v2.topic_resolve_error",
                         error=str(exc)[:160])
@@ -373,6 +386,7 @@ class BoundedPlannerV2:
         if self.planner_memory is None or self.embeddings is None:
             return False
         try:
+            self._maintain_planner_memory()
             hits = self.planner_memory.count_branch_combo_successes(unique_branches)
             if hits >= self.confidence_hit_count:
                 return False
@@ -386,6 +400,33 @@ class BoundedPlannerV2:
             log.warning("planner_v2.few_shot_recall_error",
                         error=str(exc)[:120])
             return False
+
+    def _maintain_planner_memory(self) -> None:
+        """Keep Chroma 3 topic references aligned with live Postgres topics."""
+        if getattr(self, "_planner_memory_maintained", False):
+            return
+        try:
+            from services.postgres_service import PostgresService
+            pg = PostgresService()
+            pg.connect()
+            with pg.cursor() as cur:
+                cur.execute("SELECT topic_id FROM topics_v2")
+                live_topic_ids = {
+                    str(row["topic_id"])
+                    for row in (cur.fetchall() or [])
+                    if row.get("topic_id")
+                }
+            if live_topic_ids and hasattr(
+                self.planner_memory, "prune_stale_topic_references",
+            ):
+                self.planner_memory.prune_stale_topic_references(
+                    live_topic_ids,
+                )
+        except Exception as exc:
+            log.warning("planner_v2.planner_memory_maintenance_failed",
+                        error=str(exc)[:160])
+        finally:
+            self._planner_memory_maintained = True
 
     def _run_one(self, inv: BranchInvocation) -> BranchResult:
         t0 = time.monotonic()
@@ -744,6 +785,23 @@ def _is_broad_topic_listing(sub: Subtask) -> bool:
     )
 
 
+def _subtask_needs_kg_signal(sub: Subtask) -> bool:
+    if "kg" in (sub.suggested_branches or []):
+        return True
+    if sub.intent in {
+        "propagation", "propagation_trace", "influencer_query",
+        "coordination_check", "community_structure", "cascade_query",
+        "explain_decision",
+    }:
+        return True
+    text = (sub.text or "").lower()
+    return bool(re.search(
+        r"\b(knowledge graph|propagat|reply chains?|spread|path|trace|"
+        r"cascade|amplif|influenc|centrality|network|echo chamber)\w*\b",
+        text,
+    ))
+
+
 def _coerce_topic_id(value: str) -> str:
     """Return a real topic_id for `value`, resolving labels when needed."""
     value = (value or "").strip()
@@ -805,9 +863,17 @@ def _first_kg_output_with_signal(
         attempted.append(tid)
         out = factory(tid)
         out.target.setdefault("attempted_topic_ids", list(attempted))
+        out.target.setdefault("selected_topic_id", tid)
         if first is None:
             first = out
         if _kg_output_has_signal(out):
+            if attempted and tid != attempted[0]:
+                out.target["fallback_from_topic_id"] = attempted[0]
+                out.target["fallback_reason"] = (
+                    "primary topic had no KG graph signal; selected a "
+                    "semantically similar topic with graph evidence"
+                )
+                out.target["attempted_topic_ids"] = list(attempted)
             return out
     assert first is not None
     first.target.setdefault("attempted_topic_ids", attempted)

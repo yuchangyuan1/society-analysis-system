@@ -17,6 +17,20 @@ class ImageAsset(BaseModel):
 
 
 class Post(BaseModel):
+    """A normalized social-media post.
+
+    Reddit-only convention (the project's only supported source today):
+    `account_id` is the Reddit username verbatim, and `posts_v2.author`
+    stores the same string. The two columns are intentionally identical
+    on Reddit because the username is itself a stable identifier; we do
+    not crawl Reddit's internal `t2_xxx` user IDs.
+
+    If/when the project gains a second platform that distinguishes
+    display name from handle (e.g. Twitter/X), introduce an `accounts_v2`
+    table and let `account_id` become a synthetic key — `author` will
+    then carry the display handle.
+    """
+
     id: str
     account_id: str
     channel_name: str = ""     # human-readable source label, e.g. r/worldnews

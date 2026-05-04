@@ -392,14 +392,23 @@ def test_module_card_doc_text_includes_examples():
 def test_planner_memory_count_branch_combo_successes():
     from services.planner_memory import PlannerMemory
     cols = MagicMock()
-    cols.planner.count.return_value = 4
+    cols.planner.handle.get.return_value = {
+        "metadatas": [
+            {"branches": "evidence,nl2sql"},
+            {"branches": "evidence,nl2sql"},
+            {"branches": "kg"},
+            {"branches": "evidence,nl2sql"},
+            {"branches": "evidence"},
+            {"branches": "evidence,nl2sql"},
+        ],
+    }
     pm = PlannerMemory(collections=cols)
     n = pm.count_branch_combo_successes(["evidence", "nl2sql"])
     assert n == 4
-    cols.planner.count.assert_called_with(where={
-        "kind": "workflow_success",
-        "branches": "evidence,nl2sql",
-    })
+    cols.planner.handle.get.assert_called_with(
+        where={"kind": "workflow_success"},
+        include=["metadatas"],
+    )
 
 
 # ── ReflectionStore ──────────────────────────────────────────────────────────

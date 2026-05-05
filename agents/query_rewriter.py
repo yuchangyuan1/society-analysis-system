@@ -127,6 +127,82 @@ shallow GROUP-BY answers that miss the structure of the spread.
   {"source": "bbc"} for evidence; leave empty by default.
 - Do NOT invent IDs. If you cannot resolve, leave the field null.
 - Output STRICT JSON only. No prose. No markdown fences.
+
+DISAMBIGUATION RULES (read carefully; common past mistakes):
+
+(R1) "Knowledge Graph" in the question is NOT a hint about intent. The KG is
+     simply the data source. The SPECIFIC kg_query_kind comes from the verb
+     the user used:
+       - "trace propagation paths" / "show reply chains" / "how it spread" /
+         "cascade" / "longest thread"  -> intent = "cascade_query"
+                                          (NOT "influencer_query")
+       - "who is most influential" / "top spreaders" / "amplifiers" /
+         "key opinion leaders"          -> intent = "influencer_query"
+       - "is this organised" / "bot network" / "coordinated"
+                                        -> intent = "coordination_check"
+       - "echo chamber" / "polarised cluster"
+                                        -> intent = "community_structure"
+     If the user asks for BOTH "trace reply chains" AND "who amplifies",
+     that is TWO subtasks: cascade_query + influencer_query. Do not collapse
+     them into a single influencer_query.
+
+(R2) Verbs of motion / chains ("trace", "spread", "propagation", "reply
+     chain", "cascade", "thread") are ALWAYS cascade_query or
+     propagation_trace, never influencer_query. influencer_query answers
+     "who", not "how".
+
+FEW-SHOT EXAMPLES:
+
+Example A (the historical mistake we are fixing):
+  User: "For the topic about Military Strategy and Tactical Movements, trace
+         propagation paths and reply chains and explain what the Knowledge
+         Graph shows."
+  CORRECT output:
+    {"subtasks":[
+      {"text":"Trace propagation paths and reply chains for the topic 'Military Strategy and Tactical Movements' using the knowledge graph.",
+       "intent":"cascade_query",
+       "suggested_branches":["kg"],
+       "targets":{"topic_id":"Military Strategy and Tactical Movements","metadata_filter":{}},
+       "rationale":"User asked to TRACE reply chains - cascade_query is the only KG kind that returns reply tree depth."}
+    ]}
+  WRONG output (do not produce this):
+    intent="influencer_query"  -- influencer_query returns PageRank ranking,
+                                 not reply chains. Picking it loses the
+                                 actual answer the user asked for.
+
+Example B (composite question - split into two subtasks):
+  User: "For the climate topic, who's amplifying it and how did it spread?"
+  CORRECT output:
+    {"subtasks":[
+      {"text":"Identify the top amplifiers in the climate topic.",
+       "intent":"influencer_query",
+       "suggested_branches":["kg","nl2sql"],
+       "targets":{"topic_id":"climate","metadata_filter":{}}},
+      {"text":"Trace how the climate topic spread through reply chains.",
+       "intent":"cascade_query",
+       "suggested_branches":["kg"],
+       "targets":{"topic_id":"climate","metadata_filter":{}}}
+    ]}
+
+Example C (account-to-account path - propagation_trace, not cascade_query):
+  User: "Did the rumour reach @bob from @alice?"
+  CORRECT output:
+    {"subtasks":[
+      {"text":"Trace the reply path from alice to bob.",
+       "intent":"propagation_trace",
+       "suggested_branches":["kg"],
+       "targets":{"metadata_filter":{"source_account":"alice","target_account":"bob"}}}
+    ]}
+
+Example D (pure aggregation - keep nl2sql, do not promote to KG):
+  User: "How many angry posts about climate this week?"
+  CORRECT output:
+    {"subtasks":[
+      {"text":"Count posts in the climate topic with dominant_emotion='anger' in the last 7 days.",
+       "intent":"community_count",
+       "suggested_branches":["nl2sql"],
+       "targets":{"topic_id":"climate","timeframe":"last_7d","metadata_filter":{}}}
+    ]}
 """
 
 

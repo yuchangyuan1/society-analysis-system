@@ -346,13 +346,20 @@ class KGQueryTool:
             out.elapsed_ms = int((time.monotonic() - t0) * 1000)
             return out
 
-        # Root posts of cascades = posts in this topic that themselves are
-        # NOT replies (no outgoing Replied edge to a parent). For each, count
-        # descendants and unique authors.
+        # Most-amplified posts in this topic, ranked by descendant count.
+        # Kuzu does not support `WHERE NOT (var)-[:rel]->(...)` pattern
+        # predicates - the match silently returns 0 rows. The previous formulation
+        # hard-filtered to "true roots" via that idiom and produced an empty
+        # cascade output even on topics with hundreds of reply edges.
+        # Drop the strict-root filter: a "viral" cascade is now any post in
+        # the topic with cascade_size > 0, regardless of whether the post
+        # itself is a reply. This matches what users mean by "most amplified
+        # posts" and survives the cross-topic-reply pattern that's common
+        # in this dataset (most parent posts of in-topic replies live in
+        # other topics).
         cypher = (
             "MATCH (root:Post)-[:BelongsToTopic]->(t:Topic {id: $tid}) "
-            "WHERE NOT (root)-[:Replied]->(:Post) "
-            "OPTIONAL MATCH (root)<-[:Replied*1..10]-(child:Post) "
+            "OPTIONAL MATCH (child:Post)-[:Replied*1..10]->(root) "
             "OPTIONAL MATCH (a:Account)-[:Posted]->(child) "
             "WITH root, count(DISTINCT child) AS cascade_size, "
             "     count(DISTINCT a)            AS unique_authors "

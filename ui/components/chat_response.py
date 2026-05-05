@@ -321,6 +321,12 @@ def _render_graph_canvas(nodes: list[dict[str, Any]], edges: list[dict[str, Any]
         st.caption("No graph nodes are available for visualization.")
         return
 
+    # streamlit-agraph's `agraph()` has no `key=` parameter, so two turns whose
+    # KG payloads happen to be identical (e.g. cached results) collide on
+    # Streamlit's auto-generated component_instance id. Threading a per-call
+    # counter through Config makes the JSON hash unique per render.
+    counter = st.session_state.get("_kg_canvas_counter", 0) + 1
+    st.session_state["_kg_canvas_counter"] = counter
     config = Config(
         width="100%",
         height=420,
@@ -328,5 +334,6 @@ def _render_graph_canvas(nodes: list[dict[str, Any]], edges: list[dict[str, Any]
         physics=True,
         hierarchical=False,
         nodeHighlightBehavior=True,
+        instanceId=f"kg-{counter}",
     )
     agraph(nodes=graph_nodes, edges=graph_edges, config=config)

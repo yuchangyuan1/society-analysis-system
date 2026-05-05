@@ -8,6 +8,10 @@ import requests
 
 API_BASE = os.getenv("RESEARCH_API_BASE", "http://127.0.0.1:8000")
 _TIMEOUT = float(os.getenv("RESEARCH_API_TIMEOUT", "10"))
+# /chat/query runs full LLM orchestration (rewriter -> planner -> branches ->
+# report writer -> critic) and can take 1-3 minutes. Read-only GETs use the
+# short _TIMEOUT; long-running POSTs default to this floor unless overridden.
+_LONG_POST_TIMEOUT = float(os.getenv("RESEARCH_API_LONG_TIMEOUT", "240"))
 
 
 def _get_json(path: str) -> dict[str, Any]:
@@ -26,7 +30,7 @@ def _post_json(path: str, payload: dict[str, Any], timeout: float | None = None)
     resp = requests.post(
         f"{API_BASE}{path}",
         json=payload,
-        timeout=timeout or max(_TIMEOUT, 60.0),
+        timeout=timeout if timeout is not None else _LONG_POST_TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()

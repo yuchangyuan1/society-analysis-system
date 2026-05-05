@@ -71,45 +71,68 @@ freshness defaults to 30 days for trending / propagation queries.
 Use this path for course presentations or when another machine needs to
 reproduce the system with minimal local setup.
 
-Prerequisites:
+**Prerequisites**
 
-- Docker Desktop with Compose v2.
-- A `.env` file copied from `.env.example` with at least `OPENAI_API_KEY`
-  filled in.
+- Docker Desktop (Compose v2). Tested on Linux, macOS, and Windows
+  (run the script from Git Bash or WSL).
+- ~10 GB free disk for the image + model cache.
+- An OpenAI API key.
+
+**One-command bootstrap (recommended for first clone)**
 
 ```bash
-cp .env.example .env
-# edit .env and set OPENAI_API_KEY
-
-docker compose up --build
+cp .env.example .env          # edit OPENAI_API_KEY
+LOAD_FIXTURE=1 ./scripts/bootstrap.sh
 ```
 
-Open <http://localhost:8501>.
+`scripts/bootstrap.sh` is idempotent and takes care of:
 
-Compose starts:
+1. validating that `OPENAI_API_KEY` is filled in,
+2. `docker compose up -d --build` (first build ~10 min, pulls torch + sentence-transformers),
+3. waiting for `api` to report `healthy`,
+4. seeding Chroma 3 (planner memory) via `scripts.seed_planner_memory`,
+5. seeding Chroma 2 (NL2SQL emotion exemplars + guardrail guides) via
+   `scripts.seed_emotion_nl2sql_examples`,
+6. when `LOAD_FIXTURE=1`, loading `tests/fixtures/posts_v2_smoke.jsonl`
+   so the UI has demo data on first launch.
 
-- `postgres` on host port `15432` with `db/schema_v2.sql` applied on first boot;
-- `api` on <http://localhost:8000>;
-- `ui` on <http://localhost:8501>;
-- shared runtime data under `./data`;
-- persistent Docker volumes for Postgres data and model/cache files.
+When the script finishes, open <http://localhost:8501>.
 
-Useful demo commands:
+**Manual equivalent**
+
+If you prefer to run the steps yourself:
 
 ```bash
-# Seed planner memory after the stack is up.
+cp .env.example .env          # edit OPENAI_API_KEY
+docker compose up -d --build
+# wait until `docker compose ps` shows api as (healthy)
 docker compose exec api python -m scripts.seed_planner_memory
-
-# Load the bundled fixture into Postgres/Kuzu for an offline smoke demo.
+docker compose exec api python -m scripts.seed_emotion_nl2sql_examples
+# optional: load demo data
 docker compose exec api python main.py --jsonl tests/fixtures/posts_v2_smoke.jsonl
+```
 
-# Pull official/evidence sources into Chroma.
+**What the stack runs**
+
+- `postgres` on host port `15432`; `db/schema_v2.sql` is applied on first boot;
+- `api` (FastAPI) on <http://localhost:8000>, OpenAPI docs at `/docs`;
+- `ui` (Streamlit) on <http://localhost:8501>;
+- shared runtime data under `./data` (bind-mounted into both api and ui);
+- persistent named volumes for Postgres data and the Hugging Face model cache.
+
+**Useful operations**
+
+```bash
+# Pull official/evidence sources into Chroma 1.
 docker compose exec api python -m agents.official_ingestion_pipeline --once
 
-# Tear down containers but keep data.
+# Tail logs.
+docker compose logs -f api ui
+
+# Stop containers but keep all data.
 docker compose down
 
-# Full reset, including Postgres volume and model/cache volume.
+# Full reset (drops Postgres volume and model cache too).
 docker compose down -v
 ```
 

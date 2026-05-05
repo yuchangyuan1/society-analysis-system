@@ -30,6 +30,7 @@ from typing import Any, Optional
 import structlog
 
 from agents.ablation_runner import AblationContext, AblationRunner
+from agents.plan_verifier import PlanVerifier
 from agents.planner_v2 import (
     BoundedPlannerV2,
     PlanExecutionV2,
@@ -41,7 +42,7 @@ from agents.query_rewriter import QueryRewriter
 from agents.quality_critic import QualityCritic
 from agents.report_writer import ReportWriter
 from models.chat import ChatResponse
-from models.query import RewrittenQuery
+from models.query import RewrittenQuery, VerifiedPlan
 from models.reflection import CriticVerdict
 from models.report_v2 import ReportV2
 from models.session import SessionState
@@ -64,14 +65,23 @@ class ChatOrchestrator:
         writer: Optional[ReportWriter] = None,
         critic: Optional[QualityCritic] = None,
         reflection: Optional[ReflectionStore] = None,
+        verifier: Optional[PlanVerifier] = None,
+        planner_memory: Optional[PlannerMemory] = None,
+        embeddings: Optional[EmbeddingsService] = None,
     ) -> None:
-        self._rewriter = rewriter or QueryRewriter()
+        self._verifier = verifier or PlanVerifier()
+        self._planner_memory = planner_memory or PlannerMemory()
+        self._embeddings = embeddings or EmbeddingsService()
+        self._rewriter = rewriter or QueryRewriter(
+            planner_memory=self._planner_memory,
+            embeddings=self._embeddings,
+        )
         self._planner = planner or BoundedPlannerV2(
             evidence_runner=default_evidence_runner,
             nl2sql_runner=default_nl2sql_runner,
             kg_runner=default_kg_runner,
-            planner_memory=PlannerMemory(),
-            embeddings=EmbeddingsService(),
+            planner_memory=self._planner_memory,
+            embeddings=self._embeddings,
         )
         self._writer = writer or ReportWriter()
         self._critic = critic or QualityCritic()
@@ -91,9 +101,26 @@ class ChatOrchestrator:
             rq = self._rewriter.rewrite(message, state)
         metrics.observe("rewriter.subtasks", len(rq.subtasks))
 
+        # 1b. Verify routing decisions BEFORE the planner executes them.
+        # See agents/plan_verifier.py for the rule list.
+        with timing("verifier.latency_ms"):
+            verified = self._verifier.verify(rq)
+        if verified.was_modified:
+            metrics.inc("verifier.applied",
+                        labels={"rules": ",".join(
+                            sorted({a.rule_id for a in verified.actions}),
+                        ) or "none"})
+            self._record_route_violations(message, verified)
+        rq = verified.rewritten
+
         # 2. Plan + execute branch DAG
         with timing("planner.latency_ms"):
             execution = self._planner.plan_and_execute(rq)
+        for sb in verified.skipped_branches:
+            execution.notes.append(
+                f"branch_skipped:{sb.branch}@{sb.subtask_index} "
+                f"reason={sb.reason} rule={sb.rule_id}",
+            )
         metrics.observe("planner.branches", len(execution.branches_used))
 
         # 3. Compose + Critic loop (single retry)
@@ -174,6 +201,42 @@ class ChatOrchestrator:
             f"critic_failed: {verdict_retry.error_kind}",
         )
         return report_retry, verdict_retry
+
+    def _record_route_violations(
+        self, user_message: str, verified: VerifiedPlan,
+    ) -> None:
+        """Write each verifier correction to Chroma 3 as anti-pattern.
+
+        These records become the negative few-shot the next Rewriter call
+        sees, closing the loop so a misroute the verifier had to fix once
+        does not repeat.
+        """
+        if not verified.actions:
+            return
+        try:
+            embedding = self._embeddings.embed(user_message[:500])
+        except Exception as exc:
+            log.warning("orchestrator.route_violation_embed_failed",
+                        error=str(exc)[:120])
+            return
+        for action in verified.actions:
+            sub_idx = action.subtask_index
+            try:
+                sub = verified.rewritten.subtasks[sub_idx]
+            except IndexError:
+                continue
+            before_branches = (action.before or {}).get("branches", []) or []
+            try:
+                self._planner_memory.upsert_workflow_error(
+                    question=sub.text or user_message,
+                    branches_used=list(before_branches),
+                    error_kind=f"route_violation:{action.rule_id}",
+                    embedding=embedding,
+                )
+            except Exception as exc:
+                log.warning("orchestrator.route_violation_write_failed",
+                            rule=action.rule_id,
+                            error=str(exc)[:120])
 
     def _install_ablation(
         self, rq: RewrittenQuery, execution: PlanExecutionV2,

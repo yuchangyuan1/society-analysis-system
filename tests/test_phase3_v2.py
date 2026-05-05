@@ -411,6 +411,48 @@ def test_planner_memory_count_branch_combo_successes():
     )
 
 
+def test_recall_route_violations_dedups_by_rule_id():
+    """Top-N should cover distinct rules first; duplicate rules only fill
+    leftover slots after every rule has been represented once.
+    """
+    from services.planner_memory import PlannerMemory
+    cols = MagicMock()
+    # 6 records: 3 R-OVERVIEW (most similar), 1 R-KG-TOPIC-ANCHOR,
+    # 1 R-FACT-CHECK-EVIDENCE, 1 unrelated kind.
+    cols.planner.query.return_value = [
+        {"id": "a", "metadata": {"error_kind": "route_violation:R-OVERVIEW"}},
+        {"id": "b", "metadata": {"error_kind": "route_violation:R-OVERVIEW"}},
+        {"id": "c", "metadata": {"error_kind": "route_violation:R-OVERVIEW"}},
+        {"id": "d", "metadata": {"error_kind": "route_violation:R-KG-TOPIC-ANCHOR"}},
+        {"id": "e", "metadata": {"error_kind": "route_violation:R-FACT-CHECK-EVIDENCE"}},
+        {"id": "f", "metadata": {"error_kind": "missing_branch"}},  # not a violation
+    ]
+    pm = PlannerMemory(collections=cols)
+    out = pm.recall_recent_route_violations([0.0] * 8, n_results=5)
+
+    out_ids = [r["id"] for r in out]
+    # Pass 1 picks distinct rules in order: a (overview), d (kg-anchor),
+    # e (fact-check). Pass 2 fills with b, c (the remaining overviews).
+    assert out_ids[:3] == ["a", "d", "e"]
+    assert set(out_ids) == {"a", "b", "c", "d", "e"}
+    assert "f" not in out_ids
+
+
+def test_recall_route_violations_caps_at_n_results():
+    from services.planner_memory import PlannerMemory
+    cols = MagicMock()
+    cols.planner.query.return_value = [
+        {"id": f"r{i}", "metadata": {
+            "error_kind": f"route_violation:R-{i}",
+        }}
+        for i in range(10)
+    ]
+    pm = PlannerMemory(collections=cols)
+    out = pm.recall_recent_route_violations([0.0] * 8, n_results=3)
+    assert len(out) == 3
+    assert [r["id"] for r in out] == ["r0", "r1", "r2"]
+
+
 # ── ReflectionStore ──────────────────────────────────────────────────────────
 
 def test_reflection_routes_sql_empty_to_nl2sql():

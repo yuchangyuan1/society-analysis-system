@@ -211,9 +211,16 @@ class QueryRewriter:
         self,
         client: Optional[openai.OpenAI] = None,
         model: str = OPENAI_MODEL,
+        planner_memory: Optional[object] = None,
+        embeddings: Optional[object] = None,
     ) -> None:
         self._client = client or openai.OpenAI(api_key=OPENAI_API_KEY)
         self._model = model
+        # Optional - used to fetch route_violation anti-patterns and inject
+        # them as negative few-shot. Both must be present for the recall
+        # to fire; otherwise the Rewriter behaves exactly as before.
+        self._planner_memory = planner_memory
+        self._embeddings = embeddings
 
     # ── Public ─────────────────────────────────────────────────────────────────
 
@@ -292,8 +299,10 @@ class QueryRewriter:
         return ctx
 
     def _call_llm(self, message: str, ctx: dict) -> dict:
+        anti_patterns = self._fetch_route_violation_examples(message)
         user_msg = (
             f"Session context: {json.dumps(ctx, ensure_ascii=False)}\n"
+            f"{anti_patterns}"
             f"User message: {message}"
         )
         resp = self._client.chat.completions.create(
@@ -308,6 +317,36 @@ class QueryRewriter:
         )
         raw = (resp.choices[0].message.content or "{}").strip()
         return json.loads(raw)
+
+    def _fetch_route_violation_examples(self, message: str) -> str:
+        """Pull recent verifier corrections and format them as negative
+        few-shot. Empty string when no memory is wired or no records exist.
+        """
+        if not (self._planner_memory and self._embeddings):
+            return ""
+        try:
+            embedding = self._embeddings.embed(message[:500])
+            records = self._planner_memory.recall_recent_route_violations(
+                embedding, n_results=5,
+            )
+        except Exception as exc:
+            log.warning("query_rewriter.route_violation_recall_failed",
+                        error=str(exc)[:120])
+            return ""
+        if not records:
+            return ""
+        lines = [
+            "Anti-patterns from prior verifier corrections - DO NOT repeat "
+            "these routing mistakes:",
+        ]
+        for r in records:
+            meta = r.get("metadata") or {}
+            doc = (r.get("document") or "").strip().replace("\n", " ")
+            rule = str(meta.get("error_kind") or "").replace(
+                "route_violation:", "",
+            )
+            lines.append(f"  - [{rule}] {doc[:240]}")
+        return "\n".join(lines) + "\n"
 
     def _parse_subtasks(self, data: dict, ctx: dict) -> list[Subtask]:
         items = data.get("subtasks") or []

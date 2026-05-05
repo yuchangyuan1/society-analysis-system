@@ -145,6 +145,58 @@ class PlannerMemory:
             where={"kind": "workflow_error"},
         )
 
+    def recall_recent_route_violations(
+        self, embedding: list[float], n_results: int = 5,
+    ) -> list[dict]:
+        """Recall verifier corrections (negative few-shot for the Rewriter).
+
+        These are `workflow_error` records whose `error_kind` is
+        `route_violation:<rule_id>` - written by ChatOrchestrator whenever
+        PlanVerifier had to fix a routing decision. They serve as an
+        anti-pattern channel: the next Rewriter call sees "last time you
+        chose X for this kind of question, the verifier had to correct it".
+
+        Deduplication: at most one record per rule_id is kept in the first
+        pass, so the negative few-shot covers different failure modes
+        instead of repeating the same one. Remaining slots are filled by
+        next-best similarity regardless of rule_id.
+        """
+        # Chroma `$contains` only works on documents, so over-fetch and
+        # post-filter in Python.
+        raw = self.collections.planner.query(
+            embedding=embedding,
+            n_results=max(n_results * 4, n_results),
+            where={"kind": "workflow_error"},
+        )
+        violations: list[tuple[str, dict]] = []
+        for r in raw:
+            meta = r.get("metadata") or {}
+            kind = str(meta.get("error_kind") or "")
+            if kind.startswith("route_violation:"):
+                rule_id = kind.split(":", 1)[1] or "unknown"
+                violations.append((rule_id, r))
+
+        # Pass 1: one record per rule_id, in similarity order.
+        seen_rules: set[str] = set()
+        out: list[dict] = []
+        for rule_id, rec in violations:
+            if rule_id in seen_rules:
+                continue
+            seen_rules.add(rule_id)
+            out.append(rec)
+            if len(out) >= n_results:
+                return out
+
+        # Pass 2: fill any remaining slots with next-best regardless of rule.
+        seen_ids = {r.get("id") for r in out}
+        for _, rec in violations:
+            if rec.get("id") in seen_ids:
+                continue
+            out.append(rec)
+            if len(out) >= n_results:
+                break
+        return out
+
     def count_branch_combo_successes(self, branches_used: list[str]) -> int:
         """Used by Q9 confidence rule (PROJECT_REDESIGN_V2.md 7c-B)."""
         key = ",".join(branches_used)

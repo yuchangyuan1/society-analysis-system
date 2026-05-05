@@ -66,3 +66,40 @@ class RewrittenQuery(BaseModel):
     @property
     def is_multistep(self) -> bool:
         return len(self.subtasks) > 1
+
+
+# ── Plan verification (post-Rewriter, pre-Planner) ───────────────────────────
+
+class VerifierAction(BaseModel):
+    """One correction the PlanVerifier applied to a Subtask.
+
+    Recorded so the closed loop can write `workflow_error(rule_id=...)` back
+    into Chroma 3 as anti-pattern few-shot for the next Rewriter call.
+    """
+
+    rule_id: str            # e.g. "R-OVERVIEW", "R-INTENT-BRANCH-MATCH"
+    subtask_index: int
+    detail: str = ""
+    before: dict = Field(default_factory=dict)
+    after: dict = Field(default_factory=dict)
+
+
+class SkippedBranch(BaseModel):
+    """Branch the verifier removed from the plan before execution."""
+
+    subtask_index: int
+    branch: BranchName
+    reason: str
+    rule_id: str
+
+
+class VerifiedPlan(BaseModel):
+    """Output of `agents.plan_verifier.PlanVerifier`."""
+
+    rewritten: RewrittenQuery
+    actions: list[VerifierAction] = Field(default_factory=list)
+    skipped_branches: list[SkippedBranch] = Field(default_factory=list)
+
+    @property
+    def was_modified(self) -> bool:
+        return bool(self.actions) or bool(self.skipped_branches)

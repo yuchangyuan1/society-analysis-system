@@ -686,14 +686,13 @@ def default_kg_runner(inv: BranchInvocation) -> KGOutput:
         )
 
     # Fallback: PageRank gives a more useful default than raw post counts.
-    if not topic_id:
-        from models.branch_output import KGOutput as _KGOut
-        return _KGOut(query_kind="influencer_rank",
-                       target={"reason": "no topic anchor available"})
+    # When no topic anchor is available, run global PageRank rather than
+    # returning an empty stub - the previous behaviour produced 0/0 KG cards
+    # in the UI even though the analytics layer supports topic_id=None.
     return _first_kg_output_with_signal(
-        topic_candidates,
+        topic_candidates or [""],
         lambda tid: analytics.influencer_rank(
-            topic_id=tid, top_k=10, since_days=since_days,
+            topic_id=tid or None, top_k=10, since_days=since_days,
         ),
     )
 

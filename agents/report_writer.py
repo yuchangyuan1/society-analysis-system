@@ -133,6 +133,21 @@ Fact-check / official-source verification rules:
   the official verification as "Not found in official sources" or
   "Insufficient evidence", not as supported.
 
+Comparison / official-recap rules (ONLY apply in comparison or recap mode):
+- When the user asks what official media / official sources say about a
+  topic, or asks to compare official coverage against community discussion,
+  structure the answer with two sections:
+  1. "### Official Media Recap" - summarize what the evidence chunks report,
+     citing each source inline (Source: outlet, "title", date, URL).
+  2. "### Community Perspective" - summarize what the SQL rows show about
+     Reddit/community discussion (volume, dominant emotion, notable authors).
+- Do NOT apply the fact-check verdict labels in this mode. Recap and
+  comparison are descriptive, not adjudicative; pick neither
+  "Supported by official sources" nor "Insufficient evidence".
+- If one side has no data (no evidence chunks OR SQL rows=0), still emit the
+  corresponding section heading but state explicitly that no data was
+  retrieved for that side; do not fabricate it from the other side.
+
 Topic claim audit rules:
 - Use this mode when the user asks which claims inside a topic agree with
   official/evidence sources, conflict with them, or lack enough evidence.
@@ -329,6 +344,11 @@ class ReportWriter:
         sections: list[str] = [f"User question: {rq.original}"]
         fact_check = _question_is_fact_check(rq)
         claim_audit = _question_is_topic_claim_audit(rq)
+        comparison_or_recap = (
+            not fact_check
+            and not claim_audit
+            and _question_is_comparison_or_recap(rq)
+        )
 
         if fact_check:
             sections.append(
@@ -343,6 +363,16 @@ class ReportWriter:
                 "rows. For each claim, include author and post_id, classify it "
                 "as consistent, contradicted, or insufficient evidence, and "
                 "cite evidence chunk_ids for any official/evidence judgment."
+            )
+        if comparison_or_recap:
+            sections.append(
+                "Comparison/recap mode: structure the answer with two "
+                "headings - '### Official Media Recap' (summarize the "
+                "evidence chunks with inline source citations) and "
+                "'### Community Perspective' (summarize the SQL rows). Do "
+                "NOT apply the fact-check verdict labels. If one side has no "
+                "data, keep its heading and explicitly state that nothing was "
+                "retrieved for it."
             )
 
         if rq.subtasks:
@@ -419,10 +449,22 @@ class ReportWriter:
         if kg_outs:
             sections.append("Graph outputs:")
             for k in kg_outs:
+                has_returned_entities = bool(k.nodes or k.edges)
                 sections.append(
                     f"  - kind={k.query_kind} target={k.target} "
-                    f"metrics={k.metrics}"
+                    f"metrics={k.metrics} "
+                    f"returned_entities="
+                    f"{'yes' if has_returned_entities else 'none'}"
                 )
+                if not has_returned_entities and k.metrics:
+                    sections.append(
+                        "    NOTE: any 'analyzed_node_count' / "
+                        "'analyzed_edge_count' values describe the size of "
+                        "the input graph the algorithm ran over, NOT entities "
+                        "returned as query results. Do NOT phrase those "
+                        "numbers as 'nodes/participants found' or 'edges "
+                        "returned'."
+                    )
                 if k.target.get("fallback_from_topic_id"):
                     sections.append(
                         "    topic_fallback: primary topic "
@@ -633,6 +675,13 @@ def _question_needs_kg(rq: RewrittenQuery) -> bool:
 def _question_is_fact_check(rq: RewrittenQuery) -> bool:
     if any(s.intent == "topic_claim_audit" for s in rq.subtasks):
         return False
+    # Comparison / official-recap intents share keywords with fact-check
+    # ("official source", "official media", ...). When the Rewriter has
+    # already classified the question as one of those, trust that signal
+    # and stay out of fact-check mode - otherwise both branches add their
+    # own system addenda and the LLM gets contradictory instructions.
+    if any(s.intent in {"official_recap", "comparison"} for s in rq.subtasks):
+        return False
     if any(s.intent == "fact_check" for s in rq.subtasks):
         return True
     text = " ".join([rq.original] + [s.text for s in rq.subtasks]).lower()
@@ -640,6 +689,27 @@ def _question_is_fact_check(rq: RewrittenQuery) -> bool:
         "fact-check", "fact check", "verify", "verification",
         "official source", "official sources", "claim", "true or false",
         "真假", "真伪", "核实", "事实核查", "官方来源", "官方说法",
+    ))
+
+
+def _question_is_comparison_or_recap(rq: RewrittenQuery) -> bool:
+    """Detect comparison / official-recap questions.
+
+    Trust the Rewriter's intent first. The text-keyword fallback is
+    deliberately narrow - it must NOT overlap with fact-check keywords
+    like "official source(s)" or "verify", or both _question_is_fact_check
+    and this helper would fire and the LLM would receive contradictory
+    addenda.
+    """
+    if any(s.intent in {"official_recap", "comparison"} for s in rq.subtasks):
+        return True
+    text = " ".join([rq.original] + [s.text for s in rq.subtasks]).lower()
+    return any(k in text for k in (
+        "official media", "what does official media", "what do official media",
+        "what are official media",
+        " vs ", "versus", "compare ", "comparison between",
+        "contrast",
+        "官方媒体",
     ))
 
 

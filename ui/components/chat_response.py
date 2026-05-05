@@ -169,10 +169,20 @@ def render_knowledge_graph(branch_outputs: dict[str, list[Any]]) -> None:
 
     with st.expander(title, expanded=bool(nodes or edges)):
         cols = st.columns(4)
-        cols[0].metric("Nodes", len(nodes))
-        cols[1].metric("Edges", len(edges))
-        cols[2].metric("Graph nodes", metrics.get("node_count", len(nodes)))
-        cols[3].metric("Graph edges", metrics.get("edge_count", len(edges)))
+        cols[0].metric("Returned nodes", len(nodes))
+        cols[1].metric("Returned edges", len(edges))
+        cols[2].metric(
+            "Analyzed nodes",
+            metrics.get("analyzed_node_count", len(nodes)),
+            help="Size of the input graph the algorithm ran over (may be "
+                 "larger than the returned node list).",
+        )
+        cols[3].metric(
+            "Analyzed edges",
+            metrics.get("analyzed_edge_count", len(edges)),
+            help="Size of the input graph the algorithm ran over (may be "
+                 "larger than the returned edge list).",
+        )
 
         if not nodes and not edges:
             reason = ((data.get("target") or {}).get("reason")

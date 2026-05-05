@@ -57,7 +57,7 @@ def test_influencer_rank_picks_central_node():
 def test_influencer_rank_returns_empty_on_empty_graph():
     out = KGAnalytics(kuzu=_kuzu_with_replies([])).influencer_rank()
     assert out.nodes == []
-    assert out.metrics["node_count"] == 0
+    assert out.metrics["analyzed_node_count"] == 0
 
 
 # ── bridge_accounts ──────────────────────────────────────────────────────────

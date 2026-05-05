@@ -121,11 +121,14 @@ Rules:
   or empty. Use:
       COALESCE(
         mode() WITHIN GROUP (ORDER BY NULLIF(p.dominant_emotion, '')),
-        NULLIF(t.dominant_emotion, ''),
+        MAX(NULLIF(t.dominant_emotion, '')),
         'Not specified'
       )
-  This avoids hiding a topic-level emotion just because individual post rows
-  were not annotated.
+  The topic-level fallback is wrapped in MAX(...) so the surrounding query
+  stays valid under PostgreSQL's GROUP BY rules - both branches of COALESCE
+  are aggregates, which holds even when the query has no GROUP BY at all or
+  groups only on a non-PK column. This avoids hiding a topic-level emotion
+  just because individual post rows were not annotated.
 
 Freshness rules (production hardening):
 - DEFAULT time window when the user input mentions "trend",
@@ -220,9 +223,11 @@ _BUILTIN_GUIDANCE: list[tuple[str, str, str, int]] = [
         "from the matching posts_v2 rows after those filters, but fall back "
         "to topics_v2.dominant_emotion when every matching post-level emotion "
         "is NULL or empty. Use COALESCE(mode() WITHIN GROUP (ORDER BY "
-        "NULLIF(p.dominant_emotion, '')), NULLIF(t.dominant_emotion, ''), "
-        "'Not specified') AS dominant_emotion. Do not lose the topic-level "
-        "emotion when post rows are unannotated.",
+        "NULLIF(p.dominant_emotion, '')), MAX(NULLIF(t.dominant_emotion, '')), "
+        "'Not specified') AS dominant_emotion. The MAX(...) wrapper on the "
+        "topic-level fallback is required so PostgreSQL accepts the query "
+        "without listing t.dominant_emotion in GROUP BY. Do not lose the "
+        "topic-level emotion when post rows are unannotated.",
         "rule",
         100,
     ),
@@ -249,7 +254,7 @@ _BUILTIN_GUIDANCE: list[tuple[str, str, str, int]] = [
         "label, post count, and dominant emotion. SQL shape: SELECT "
         "t.topic_id, t.label, COUNT(*) AS post_count, "
         "COALESCE(mode() WITHIN GROUP (ORDER BY NULLIF(p.dominant_emotion, "
-        "'')), NULLIF(t.dominant_emotion, ''), 'Not specified') AS "
+        "'')), MAX(NULLIF(t.dominant_emotion, '')), 'Not specified') AS "
         "dominant_emotion "
         "FROM posts_v2 p JOIN topics_v2 t ON p.topic_id = t.topic_id "
         "WHERE p.posted_at >= NOW() - INTERVAL '1 day' "

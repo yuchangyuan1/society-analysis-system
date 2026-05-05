@@ -32,6 +32,14 @@ from services.kuzu_service import KuzuService
 log = structlog.get_logger(__name__)
 
 
+# echo_chamber output caps: keep node/edge lists small enough to render in
+# the UI graph and stay under the report-writer payload budget. The full
+# graph size is still reported via metrics["analyzed_*"].
+_ECHO_TOP_COMMUNITIES = 8
+_ECHO_NODE_CAP = 120
+_ECHO_EDGE_CAP = 240
+
+
 # ── Subgraph extraction ──────────────────────────────────────────────────────
 
 def _account_reply_graph(
@@ -131,7 +139,8 @@ def _account_reply_graph(
 
     SUBGRAPH_CACHE.put(cache_key, g)
     return g, {
-        "cache_hit": False, "edge_count": g.number_of_edges(),
+        "cache_hit": False,
+        "analyzed_edge_count": g.number_of_edges(),
         "since_days": since_days,
     }
 
@@ -261,7 +270,7 @@ class KGAnalytics:
             return out
         g, meta = _account_reply_graph(self.kuzu, topic_id, since_days)
         if g is None or g.number_of_edges() == 0:
-            out.metrics = {"node_count": 0, **meta}
+            out.metrics = {"analyzed_node_count": 0, **meta}
             out.elapsed_ms = int((time.monotonic() - t0) * 1000)
             return out
 
@@ -287,9 +296,13 @@ class KGAnalytics:
             out, g, {str(k): float(v) for k, v in scores.items()},
             top_accounts,
         )
+        # `analyzed_*` describes the graph the algorithm ran over (the input);
+        # `len(out.nodes)/len(out.edges)` is what was actually returned to the
+        # caller. Keeping them as separate keys avoids the LLM/UI mismatch
+        # where metrics["node_count"]=N got described as "N nodes returned".
         out.metrics = {
-            "node_count": g.number_of_nodes(),
-            "edge_count": g.number_of_edges(),
+            "analyzed_node_count": g.number_of_nodes(),
+            "analyzed_edge_count": g.number_of_edges(),
             **meta,
         }
         out.elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -314,8 +327,8 @@ class KGAnalytics:
         g, meta = _account_reply_graph(self.kuzu, topic_id=None,
                                         since_days=since_days)
         if g is None or g.number_of_nodes() < 3:
-            out.metrics = {"node_count": getattr(g, "number_of_nodes",
-                                                  lambda: 0)(),
+            out.metrics = {"analyzed_node_count": getattr(
+                               g, "number_of_nodes", lambda: 0)(),
                            "reason": "graph_too_small", **meta}
             out.elapsed_ms = int((time.monotonic() - t0) * 1000)
             return out
@@ -338,8 +351,8 @@ class KGAnalytics:
                              "out_degree": int(g.out_degree(acc_id))},
             ))
         out.metrics = {
-            "node_count": g.number_of_nodes(),
-            "edge_count": g.number_of_edges(),
+            "analyzed_node_count": g.number_of_nodes(),
+            "analyzed_edge_count": g.number_of_edges(),
             **meta,
         }
         out.elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -415,8 +428,8 @@ class KGAnalytics:
         out.metrics = {
             "community_count": len(kept_comms),
             "total_communities": len(comms),
-            "node_count": g.number_of_nodes(),
-            "edge_count": g.number_of_edges(),
+            "analyzed_node_count": g.number_of_nodes(),
+            "analyzed_edge_count": g.number_of_edges(),
             **meta,
         }
         out.elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -470,12 +483,55 @@ class KGAnalytics:
             out.elapsed_ms = int((time.monotonic() - t0) * 1000)
             return out
 
+        # Project the partition into KGNode/KGEdge so the UI can render the
+        # cluster structure and the LLM/UI agree on counts. Cap output to the
+        # top-N largest communities so a 300-node graph doesn't blow up the
+        # report payload.
+        comm_sizes: dict[int, int] = {}
+        for _node, comm in partition.items():
+            comm_sizes[int(comm)] = comm_sizes.get(int(comm), 0) + 1
+        top_communities = sorted(
+            comm_sizes.items(), key=lambda kv: kv[1], reverse=True,
+        )[:_ECHO_TOP_COMMUNITIES]
+        kept_comm_ids = {cid for cid, _ in top_communities}
+
+        emitted_nodes = 0
+        for node_id, comm in partition.items():
+            if int(comm) not in kept_comm_ids:
+                continue
+            if emitted_nodes >= _ECHO_NODE_CAP:
+                break
+            out.nodes.append(KGNode(
+                id=str(node_id), label="Post",
+                properties={"community_id": int(comm),
+                             "community_size": comm_sizes[int(comm)]},
+            ))
+            emitted_nodes += 1
+
+        kept_node_ids = {n.id for n in out.nodes}
+        for u, v in g.edges():
+            su, sv = str(u), str(v)
+            if su not in kept_node_ids or sv not in kept_node_ids:
+                continue
+            same_comm = partition.get(u) == partition.get(v)
+            out.edges.append(KGEdge(
+                source_id=su, target_id=sv,
+                rel_type="ReplyWithin" if same_comm else "ReplyAcross",
+                properties={"intra_community": bool(same_comm)},
+            ))
+            if len(out.edges) >= _ECHO_EDGE_CAP:
+                break
+
+        # `analyzed_*` describes the input graph the modularity was computed
+        # over; out.nodes/out.edges describe what is actually returned (capped
+        # by _ECHO_NODE_CAP / _ECHO_EDGE_CAP). Keep them as separate keys so
+        # the LLM does not conflate "graph size" with "query result size".
         out.metrics = {
             "modularity": round(float(modularity), 4),
             "is_echo_chamber": modularity >= modularity_threshold,
             "community_count": len(set(partition.values())),
-            "node_count": g.number_of_nodes(),
-            "edge_count": g.number_of_edges(),
+            "analyzed_node_count": g.number_of_nodes(),
+            "analyzed_edge_count": g.number_of_edges(),
         }
         out.elapsed_ms = int((time.monotonic() - t0) * 1000)
         return out

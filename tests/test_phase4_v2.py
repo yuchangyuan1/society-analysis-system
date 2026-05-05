@@ -366,7 +366,7 @@ def test_planner_kg_candidate_fallback_uses_first_graph_signal():
             return KGOutput(
                 query_kind="reply_chains",
                 target={"topic_id": topic_id},
-                metrics={"node_count": 0, "edge_count": 0},
+                metrics={"analyzed_node_count": 0, "analyzed_edge_count": 0},
             )
         return KGOutput(
             query_kind="reply_chains",
